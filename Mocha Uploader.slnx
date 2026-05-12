@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path=".gitignore" />
+    <File Path="mocha_uploader.py" />
+    <File Path="requirements.txt" />
+  </Folder>
+</Solution>
