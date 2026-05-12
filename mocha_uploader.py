@@ -408,8 +408,6 @@ class UploadWorker(QThread):
     def _multipart_upload(self, file_size):
         file_name   = os.path.basename(self.file_path)
         dest        = self._dest_path(file_name)
-        total_parts = math.ceil(file_size / CHUNK_SIZE)
-        self.status.emit(f"Multipart upload: {total_parts} parts…")
 
         # Debug: log request details (excluding sensitive data)
         url = f"{self.base_url}/api/files/multipart/init"
@@ -444,6 +442,14 @@ class UploadWorker(QThread):
         self.status.emit(f"[DEBUG] Init response: {init_data}")
         upload_id  = init_data.get("uploadId")
         server_fid = init_data.get("fileId") or init_data.get("id") or (init_data.get("file") or {}).get("id")
+        strategy   = init_data.get("strategy", "mocha")  # "s3" or "mocha"
+        s3_key     = init_data.get("key")
+        node_id    = init_data.get("nodeId")
+
+        # Use the server's declared part size; fall back to our constant.
+        chunk_size  = init_data.get("partSizeBytes") or CHUNK_SIZE
+        total_parts = math.ceil(file_size / chunk_size)
+        self.status.emit(f"Multipart upload: {total_parts} parts… (strategy={strategy}, partSize={self._fmt_size(chunk_size)})")
         self.status.emit(f"Session: {upload_id}")
 
         parts    = []
@@ -456,39 +462,15 @@ class UploadWorker(QThread):
                     self._abort(upload_id, server_fid)
                     return None
 
-                chunk = f.read(CHUNK_SIZE)
+                chunk = f.read(chunk_size)
                 self.status.emit(f"Uploading part {part_num}/{total_parts}…")
-
-                part_url = f"{self.base_url}/api/files/multipart/part"
-                part_params = {
-                    "uploadId":   upload_id,
-                    "partNumber": part_num,
-                }
-                if server_fid:
-                    part_params["fileId"] = server_fid
-                part_headers = self._headers(file_name)
-                self.status.emit(f"[DEBUG] Part upload URL: {part_url}")
-                self.status.emit(f"[DEBUG] Params: {part_params}")
-                self.status.emit(f"[DEBUG] Headers: {{'Authorization': '(hidden)', 'x-file-name': file_name}}")
                 self.status.emit(f"[DEBUG] Chunk size: {len(chunk)} bytes")
-                try:
-                    part_resp = requests.put(
-                        part_url,
-                        headers=part_headers,
-                        params=part_params,
-                        data=chunk,
-                        timeout=300,
-                    )
-                    part_resp.raise_for_status()
-                except requests.HTTPError as e:
-                    self.status.emit(f"[DEBUG] HTTPError: {e}")
-                    self.status.emit(f"[DEBUG] Response status: {getattr(e.response, 'status_code', None)}")
-                    self.status.emit(f"[DEBUG] Response content: {getattr(e.response, 'text', None)}")
-                    raise
-                except Exception as e:
-                    self.status.emit(f"[DEBUG] Exception: {e}")
-                    raise
-                etag = part_resp.headers.get("ETag", "")
+
+                if strategy == "s3":
+                    etag = self._upload_part_s3(upload_id, server_fid, part_num, chunk, strategy, s3_key, node_id)
+                else:
+                    etag = self._upload_part_mocha(upload_id, server_fid, part_num, chunk)
+
                 parts.append({"partNumber": part_num, "etag": etag})
 
                 uploaded += len(chunk)
@@ -509,6 +491,90 @@ class UploadWorker(QThread):
         self.status.emit(f"Multipart complete. File ID: {file_id}")
         self.progress.emit(100)
         return file_id
+
+    def _upload_part_mocha(self, upload_id, server_fid, part_num, chunk):
+        """Upload one part through the Mocha relay (strategy='mocha')."""
+        part_url    = f"{self.base_url}/api/files/multipart/part"
+        part_params = {"uploadId": upload_id, "partNumber": part_num}
+        if server_fid:
+            part_params["fileId"] = server_fid
+        self.status.emit(f"[DEBUG] Part upload URL: {part_url}")
+        self.status.emit(f"[DEBUG] Params: {part_params}")
+        self.status.emit(f"[DEBUG] Headers: {{'Authorization': '(hidden)'}}")
+        try:
+            resp = requests.put(
+                part_url,
+                headers=self._headers(),
+                params=part_params,
+                data=chunk,
+                timeout=120,
+            )
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            self.status.emit(f"[DEBUG] HTTPError: {e}")
+            self.status.emit(f"[DEBUG] Response status: {getattr(e.response, 'status_code', None)}")
+            self.status.emit(f"[DEBUG] Response content: {getattr(e.response, 'text', None)}")
+            raise
+        except Exception as e:
+            self.status.emit(f"[DEBUG] Exception: {e}")
+            raise
+        return resp.headers.get("ETag", "")
+
+    def _upload_part_s3(self, upload_id, server_fid, part_num, chunk, strategy, s3_key, node_id):
+        """Upload one part directly to S3 via a presigned URL (strategy='s3')."""
+        # Step 1: ask Mocha for a presigned URL for this part
+        presign_url     = f"{self.base_url}/api/files/multipart/presigned"
+        presign_payload = {
+            "uploadId":   upload_id,
+            "partNumber": part_num,
+            "strategy":   strategy,
+            "key":        s3_key,
+            "nodeId":     node_id,
+        }
+        if server_fid:
+            presign_payload["fileId"] = server_fid
+        self.status.emit(f"[DEBUG] Presign URL: {presign_url}")
+        self.status.emit(f"[DEBUG] Presign payload: {presign_payload}")
+        try:
+            presign_resp = requests.post(
+                presign_url,
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json=presign_payload,
+                timeout=30,
+            )
+            presign_resp.raise_for_status()
+        except requests.HTTPError as e:
+            self.status.emit(f"[DEBUG] HTTPError (presign): {e}")
+            self.status.emit(f"[DEBUG] Response status: {getattr(e.response, 'status_code', None)}")
+            self.status.emit(f"[DEBUG] Response content: {getattr(e.response, 'text', None)}")
+            raise
+        except Exception as e:
+            self.status.emit(f"[DEBUG] Exception (presign): {e}")
+            raise
+
+        presign_data = presign_resp.json()
+        signed_url   = presign_data.get("url") or presign_data.get("presignedUrl")
+        if not signed_url:
+            raise RuntimeError(f"No presigned URL in response: {presign_data}")
+        self.status.emit(f"[DEBUG] Uploading part {part_num} directly to S3…")
+
+        # Step 2: PUT the chunk directly to S3 (no auth header — the URL is pre-signed)
+        try:
+            s3_resp = requests.put(
+                signed_url,
+                data=chunk,
+                timeout=120,
+            )
+            s3_resp.raise_for_status()
+        except requests.HTTPError as e:
+            self.status.emit(f"[DEBUG] HTTPError (S3 PUT): {e}")
+            self.status.emit(f"[DEBUG] Response status: {getattr(e.response, 'status_code', None)}")
+            self.status.emit(f"[DEBUG] Response content: {getattr(e.response, 'text', None)}")
+            raise
+        except Exception as e:
+            self.status.emit(f"[DEBUG] Exception (S3 PUT): {e}")
+            raise
+        return s3_resp.headers.get("ETag", "")
 
     def _abort(self, upload_id, file_id=None):
         try:
