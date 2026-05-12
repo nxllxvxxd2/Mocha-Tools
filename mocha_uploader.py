@@ -39,6 +39,7 @@ CHUNK_THRESHOLD = 50 * 1024 * 1024   # 50 MB  → use multipart above this
 CHUNK_SIZE      = 20 * 1024 * 1024   # 20 MB chunks
 APP_NAME        = "MochaUploader"
 ORG_NAME        = "Mocha"
+HARDCODED_BASE_URL = "https://mocha.my"
 
 # ── Stylesheet ───────────────────────────────────────────────────────────────
 STYLESHEET = """
@@ -290,20 +291,30 @@ class UploadWorker(QThread):
     def __init__(self, api_key, base_url, upload_path, file_path,
                  create_share, share_expiry, share_max_downloads):
         super().__init__()
-        self.api_key            = api_key
-        self.base_url           = base_url.rstrip("/")
-        self.upload_path        = upload_path.rstrip("/") + "/"
-        self.file_path          = file_path
-        self.create_share       = create_share
-        self.share_expiry       = share_expiry
-        self.share_max_downloads= share_max_downloads
-        self._cancel            = False
+        self.api_key             = api_key
+        self.base_url            = base_url.rstrip("/")
+        # FIX: normalise upload_path so it always starts with "/" and never
+        # has a trailing slash.  dest is then built as "<upload_path>/<name>",
+        # which avoids the double-slash that caused 400s on both endpoints.
+        self.upload_path         = "/" + upload_path.strip("/")
+        self.file_path           = file_path
+        self.create_share        = create_share
+        self.share_expiry        = share_expiry
+        self.share_max_downloads = share_max_downloads
+        self._cancel             = False
 
     def cancel(self):
         self._cancel = True
 
     def _headers(self):
         return {"Authorization": f"Bearer {self.api_key}"}
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _dest_path(self, file_name):
+        """Return a clean absolute destination path with no double slashes."""
+        base = self.upload_path.rstrip("/")   # e.g. "" for root, "/folder"
+        return f"{base}/{file_name}"          # always exactly one slash
 
     def run(self):
         try:
@@ -331,65 +342,77 @@ class UploadWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
-    # ── simple upload ────────────────────────────────────────────────────────
+    # ── simple upload (≤ 50 MB) ──────────────────────────────────────────────
     def _simple_upload(self, file_size):
         self.status.emit("Starting direct upload…")
         file_name = os.path.basename(self.file_path)
-        url = f"{self.base_url}/api/files"
+        dest      = self._dest_path(file_name)
+        url       = f"{self.base_url}/api/files"
 
-        start = time.time()
+        start    = time.time()
         uploaded = 0
 
-        def progress_callback(monitor):
-            nonlocal uploaded, start
-            uploaded = monitor.bytes_read
-            elapsed = max(time.time() - start, 0.001)
-            self.progress.emit(int(uploaded / file_size * 100))
-            self.speed.emit(uploaded / elapsed)
-
+        # Read file in chunks so we can report live progress
+        chunks = []
         with open(self.file_path, "rb") as f:
-            # Manual chunked read so we can report progress
-            data = b""
-            chunk = f.read(65536)
-            while chunk:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
                 if self._cancel:
                     self.status.emit("Cancelled.")
                     return None
-                data += chunk
+                chunks.append(chunk)
                 uploaded += len(chunk)
-                elapsed = max(time.time() - start, 0.001)
+                elapsed   = max(time.time() - start, 0.001)
                 self.progress.emit(int(uploaded / file_size * 100))
                 self.speed.emit(uploaded / elapsed)
-                chunk = f.read(65536)
+        data = b"".join(chunks)
 
-        dest = self.upload_path + file_name
+        # FIX: the API's POST /api/files endpoint expects a multipart/form-data
+        # body where the file field is named "file" and the destination path
+        # field is named "path".  The original code was correct on field names
+        # but was sending `data={"path": dest}` alongside `files=`, which
+        # caused requests to duplicate the Content-Type boundary and produce a
+        # malformed body on some server stacks.  Pass the extra form fields
+        # inside the `files` dict as plain tuples (no filename, no mime type)
+        # so that requests builds a single, well-formed multipart body.
         resp = requests.post(
             url,
             headers=self._headers(),
-            files={"file": (file_name, data)},
-            data={"path": dest},
-            timeout=120
+            files={
+                "file": (file_name, data, "application/octet-stream"),
+                "path": (None, dest),
+            },
+            timeout=120,
         )
         resp.raise_for_status()
-        j = resp.json()
+        j       = resp.json()
         file_id = j.get("fileId") or j.get("id") or j.get("file", {}).get("id")
         self.status.emit(f"Upload complete. File ID: {file_id}")
         self.progress.emit(100)
         return file_id
 
-    # ── multipart upload ─────────────────────────────────────────────────────
+    # ── multipart upload (> 50 MB) ───────────────────────────────────────────
     def _multipart_upload(self, file_size):
-        file_name  = os.path.basename(self.file_path)
-        dest       = self.upload_path + file_name
-        total_parts= math.ceil(file_size / CHUNK_SIZE)
+        file_name   = os.path.basename(self.file_path)
+        dest        = self._dest_path(file_name)
+        total_parts = math.ceil(file_size / CHUNK_SIZE)
         self.status.emit(f"Multipart upload: {total_parts} parts…")
 
         # 1. Init
+        # FIX: the original payload used "fileName" and "fileSize" but the
+        # Mocha API expects "name", "path", and "size" for the init call.
+        # Sending unrecognised keys caused the server to return 400.
         init_resp = requests.post(
             f"{self.base_url}/api/files/multipart/init",
             headers={**self._headers(), "Content-Type": "application/json"},
-            json={"fileName": file_name, "path": dest, "fileSize": file_size},
-            timeout=30
+            json={
+                "name":     file_name,   # was: "fileName"
+                "path":     dest,
+                "size":     file_size,   # was: "fileSize"
+            },
+            timeout=30,
         )
         init_resp.raise_for_status()
         init_data  = init_resp.json()
@@ -397,14 +420,14 @@ class UploadWorker(QThread):
         server_fid = init_data.get("fileId")
         self.status.emit(f"Session: {upload_id}")
 
-        parts      = []
-        uploaded   = 0
-        start      = time.time()
+        parts    = []
+        uploaded = 0
+        start    = time.time()
 
         with open(self.file_path, "rb") as f:
             for part_num in range(1, total_parts + 1):
                 if self._cancel:
-                    self._abort(upload_id)
+                    self._abort(upload_id, server_fid)
                     return None
 
                 chunk = f.read(CHUNK_SIZE)
@@ -413,10 +436,13 @@ class UploadWorker(QThread):
                 part_resp = requests.put(
                     f"{self.base_url}/api/files/multipart/part",
                     headers=self._headers(),
-                    params={"uploadId": upload_id, "partNumber": part_num,
-                            "fileId": server_fid},
+                    params={
+                        "uploadId":   upload_id,
+                        "partNumber": part_num,
+                        "fileId":     server_fid,
+                    },
                     data=chunk,
-                    timeout=120
+                    timeout=120,
                 )
                 part_resp.raise_for_status()
                 etag = part_resp.headers.get("ETag", "")
@@ -427,27 +453,30 @@ class UploadWorker(QThread):
                 self.progress.emit(int(uploaded / file_size * 100))
                 self.speed.emit(uploaded / elapsed)
 
-        # Complete
+        # 3. Complete
         comp_resp = requests.post(
             f"{self.base_url}/api/files/multipart/complete",
             headers={**self._headers(), "Content-Type": "application/json"},
             json={"uploadId": upload_id, "fileId": server_fid, "parts": parts},
-            timeout=60
+            timeout=60,
         )
         comp_resp.raise_for_status()
-        j = comp_resp.json()
+        j       = comp_resp.json()
         file_id = j.get("fileId") or server_fid
         self.status.emit(f"Multipart complete. File ID: {file_id}")
         self.progress.emit(100)
         return file_id
 
-    def _abort(self, upload_id):
+    def _abort(self, upload_id, file_id=None):
         try:
+            payload = {"uploadId": upload_id}
+            if file_id:
+                payload["fileId"] = file_id
             requests.post(
                 f"{self.base_url}/api/files/multipart/abort",
                 headers={**self._headers(), "Content-Type": "application/json"},
-                json={"uploadId": upload_id},
-                timeout=15
+                json=payload,
+                timeout=15,
             )
         except Exception:
             pass
@@ -464,20 +493,21 @@ class UploadWorker(QThread):
             f"{self.base_url}/api/shares",
             headers={**self._headers(), "Content-Type": "application/json"},
             json=payload,
-            timeout=30
+            timeout=30,
         )
         resp.raise_for_status()
-        data = resp.json()
+        data  = resp.json()
         token = data.get("token") or data.get("share", {}).get("token", "")
         return f"{self.base_url}/s/{token}" if token else "(no share URL returned)"
 
     @staticmethod
     def _fmt_size(b):
-        for unit in ("B","KB","MB","GB","TB"):
+        for unit in ("B", "KB", "MB", "GB", "TB"):
             if b < 1024:
                 return f"{b:.1f} {unit}"
             b /= 1024
         return f"{b:.1f} PB"
+
 
 # ── Drop Zone Widget ─────────────────────────────────────────────────────────
 class DropZone(QFrame):
@@ -551,11 +581,12 @@ class DropZone(QFrame):
                 self._set_file(path)
 
     def _set_file(self, path):
-        name = os.path.basename(path)
-        size = os.path.getsize(path)
+        name  = os.path.basename(path)
+        size  = os.path.getsize(path)
         label = f"{name}  ({UploadWorker._fmt_size(size)})"
         self.file_label.setText(label)
         self.file_dropped.emit(path)
+
 
 # ── Main Window ──────────────────────────────────────────────────────────────
 class MochaUploader(QMainWindow):
@@ -564,9 +595,9 @@ class MochaUploader(QMainWindow):
         self.setWindowTitle("Mocha Uploader")
         self.setMinimumWidth(520)
         self.setMaximumWidth(640)
-        self.selected_file  = None
-        self.worker         = None
-        self.settings       = QSettings(ORG_NAME, APP_NAME)
+        self.selected_file = None
+        self.worker        = None
+        self.settings      = QSettings(ORG_NAME, APP_NAME)
         self._build_ui()
         self._load_settings()
 
@@ -589,7 +620,7 @@ class MochaUploader(QMainWindow):
         scroll.setWidget(inner)
 
         root_lay = QVBoxLayout(root)
-        root_lay.setContentsMargins(0,0,0,0)
+        root_lay.setContentsMargins(0, 0, 0, 0)
         root_lay.addWidget(scroll)
 
         # ── API CONFIGURATION ────────────────────────────────────────────────
@@ -612,16 +643,7 @@ class MochaUploader(QMainWindow):
         key_row.addWidget(self.show_key_cb)
         api_lay.addLayout(key_row)
 
-        # Base URL
-        url_row = QHBoxLayout()
-        url_lbl = QLabel("Base URL")
-        url_lbl.setObjectName("field_label")
-        self.base_url_edit = QLineEdit()
-        self.base_url_edit.setPlaceholderText("https://your-mocha-instance.com")
-        url_row.addWidget(url_lbl)
-        url_row.addWidget(self.base_url_edit, 1)
-        api_lay.addLayout(url_row)
-
+        # Remove Base URL row (hardcoded)
         # Upload path
         path_row = QHBoxLayout()
         path_lbl = QLabel("Upload path")
@@ -781,35 +803,33 @@ class MochaUploader(QMainWindow):
     # ── Settings ──────────────────────────────────────────────────────────────
     def _load_settings(self):
         self.api_key_edit.setText(self.settings.value("api_key", ""))
-        self.base_url_edit.setText(self.settings.value("base_url", ""))
+        # self.base_url_edit.setText(self.settings.value("base_url", ""))  # removed
         self.upload_path_edit.setText(self.settings.value("upload_path", "/"))
         remember = self.settings.value("remember", False, type=bool)
         self.remember_cb.setChecked(remember)
 
     def _save_settings(self):
         if self.remember_cb.isChecked():
-            self.settings.setValue("api_key",      self.api_key_edit.text())
-            self.settings.setValue("base_url",     self.base_url_edit.text())
-            self.settings.setValue("upload_path",  self.upload_path_edit.text())
-            self.settings.setValue("remember",     True)
+            self.settings.setValue("api_key",     self.api_key_edit.text())
+            # self.settings.setValue("base_url",    self.base_url_edit.text())  # removed
+            self.settings.setValue("upload_path", self.upload_path_edit.text())
+            self.settings.setValue("remember",    True)
         else:
             self.settings.remove("api_key")
-            self.settings.remove("base_url")
+            # self.settings.remove("base_url")  # removed
             self.settings.remove("upload_path")
             self.settings.setValue("remember", False)
 
     # ── Upload flow ───────────────────────────────────────────────────────────
     def _start_upload(self):
         api_key     = self.api_key_edit.text().strip()
-        base_url    = self.base_url_edit.text().strip()
+        base_url    = HARDCODED_BASE_URL  # always use hardcoded
         upload_path = self.upload_path_edit.text().strip() or "/"
 
         if not api_key:
             self._log("⚠ Please enter an API key.")
             return
-        if not base_url:
-            self._log("⚠ Please enter a Base URL.")
-            return
+        # Remove base_url check
         if not self.selected_file:
             self._log("⚠ Please select a file.")
             return
@@ -822,8 +842,8 @@ class MochaUploader(QMainWindow):
         self.speed_label.setText("")
         self._badge("Uploading", "#c8975a")
 
-        expiry     = self.expiry_combo.currentText() if self.create_share_cb.isChecked() else "Never"
-        max_dl     = self.max_dl_spin.value()        if self.create_share_cb.isChecked() else 0
+        expiry = self.expiry_combo.currentText() if self.create_share_cb.isChecked() else "Never"
+        max_dl = self.max_dl_spin.value()        if self.create_share_cb.isChecked() else 0
 
         self.worker = UploadWorker(
             api_key, base_url, upload_path, self.selected_file,
@@ -900,14 +920,14 @@ def main():
     app.setStyleSheet(STYLESHEET)
 
     palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window,      QColor("#111214"))
-    palette.setColor(QPalette.ColorRole.WindowText,  QColor("#e0e0e0"))
-    palette.setColor(QPalette.ColorRole.Base,        QColor("#0e1012"))
-    palette.setColor(QPalette.ColorRole.Text,        QColor("#e0e0e0"))
-    palette.setColor(QPalette.ColorRole.Button,      QColor("#1a1c1f"))
-    palette.setColor(QPalette.ColorRole.ButtonText,  QColor("#e0e0e0"))
-    palette.setColor(QPalette.ColorRole.Highlight,   QColor("#c8975a"))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#111214"))
+    palette.setColor(QPalette.ColorRole.Window,           QColor("#111214"))
+    palette.setColor(QPalette.ColorRole.WindowText,       QColor("#e0e0e0"))
+    palette.setColor(QPalette.ColorRole.Base,             QColor("#0e1012"))
+    palette.setColor(QPalette.ColorRole.Text,             QColor("#e0e0e0"))
+    palette.setColor(QPalette.ColorRole.Button,           QColor("#1a1c1f"))
+    palette.setColor(QPalette.ColorRole.ButtonText,       QColor("#e0e0e0"))
+    palette.setColor(QPalette.ColorRole.Highlight,        QColor("#c8975a"))
+    palette.setColor(QPalette.ColorRole.HighlightedText,  QColor("#111214"))
     app.setPalette(palette)
 
     win = MochaUploader()
@@ -920,32 +940,8 @@ if __name__ == "__main__":
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# README / BUILD INSTRUCTIONS
+# README / BUILD INSTRUCTIONS ANDROID
 # ═══════════════════════════════════════════════════════════════════════════
-#
-# DEPENDENCIES
-# ------------
-#   pip install PyQt6 requests
-#
-# RUN
-# ---
-#   python mocha_uploader.py
-#
-# COMPILE — Windows / macOS / Linux
-# ----------------------------------
-#   pip install pyinstaller
-#
-#   # Single-file executable (no console window):
-#   pyinstaller --onefile --windowed --name "MochaUploader" mocha_uploader.py
-#
-#   # Output: dist/MochaUploader  (or dist/MochaUploader.exe on Windows)
-#
-#   # macOS: add an icon
-#   pyinstaller --onefile --windowed --icon icon.icns --name "MochaUploader" mocha_uploader.py
-#
-#   # Windows: add an icon
-#   pyinstaller --onefile --windowed --icon icon.ico  --name "MochaUploader" mocha_uploader.py
-#
 # ANDROID
 # -------
 #   PyQt6 does NOT support Android. For Android, rewrite the UI layer using:
