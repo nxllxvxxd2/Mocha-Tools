@@ -389,7 +389,7 @@ class UploadWorker(QThread):
         self.base_url            = base_url.rstrip("/")
         self.file_pairs          = file_pairs          # [(local, dest), ...]
         self.create_share        = create_share
-        self.share_expiry        = share_expiry
+        self.share_expiry_hours  = share_expiry  # int hours or None
         self.share_max_downloads = share_max_downloads
         self._cancel             = False
 
@@ -781,8 +781,8 @@ class UploadWorker(QThread):
 
     def _create_share(self, file_id):
         payload = {"fileId": file_id}
-        if self.share_expiry and self.share_expiry != "Never":
-            payload["expiresIn"] = self.share_expiry
+        if self.share_expiry_hours is not None:
+            payload["expiresInHours"] = self.share_expiry_hours
         if self.share_max_downloads > 0:
             payload["maxDownloads"] = self.share_max_downloads
 
@@ -810,7 +810,7 @@ class UploadWorker(QThread):
         data  = resp.json()
         token = data.get("token") or data.get("share", {}).get("token", "")
         self.status.emit(f"[DEBUG] Share token: {token!r}  full JSON: {data}")
-        return f"{self.base_url}/s/{token}" if token else "(no share URL returned)"
+        return f"{self.base_url}/share/{token}" if token else "(no share URL returned)"
 
     @staticmethod
     def _fmt_size(b):
@@ -1165,13 +1165,20 @@ class FilesWorker(QThread):
         resp.raise_for_status()
         self.done.emit({"op": "move", "new_path": new_path})
 
+    # label → hours mapping for the Files-tab share dialog
+    _EXPIRY_LABEL_TO_HOURS = {
+        "1h": 1, "6h": 6, "12h": 12,
+        "1d": 24, "3d": 72, "7d": 168, "14d": 336, "30d": 720,
+    }
+
     def _share(self):
-        file_id  = self.kwargs["file_id"]
-        expiry   = self.kwargs.get("expiry", "")
-        max_dl   = self.kwargs.get("max_downloads", 0)
-        payload  = {"fileId": file_id}
-        if expiry and expiry != "Never":
-            payload["expiresIn"] = expiry
+        file_id       = self.kwargs["file_id"]
+        expiry_label  = self.kwargs.get("expiry", "Never")
+        expiry_hours  = self._EXPIRY_LABEL_TO_HOURS.get(expiry_label)  # None → omit field
+        max_dl        = self.kwargs.get("max_downloads", 0)
+        payload       = {"fileId": file_id}
+        if expiry_hours is not None:
+            payload["expiresInHours"] = expiry_hours
         if max_dl > 0:
             payload["maxDownloads"] = max_dl
         resp = requests.post(
@@ -1183,7 +1190,7 @@ class FilesWorker(QThread):
         resp.raise_for_status()
         data  = resp.json()
         token = data.get("token") or (data.get("share") or {}).get("token", "")
-        url   = f"{self.base_url}/s/{token}" if token else ""
+        url   = f"{self.base_url}/share/{token}" if token else ""
         self.done.emit({"op": "share", "url": url, "token": token})
 
     def _mkdir(self):
@@ -1511,7 +1518,7 @@ class FilesBrowserTab(QWidget):
             token = s.get("token", "")
             if fid:
                 self._shares_map[fid] = {
-                    "url":     f"{self.base_url}/s/{token}" if token else "",
+                    "url":     f"{self.base_url}/share/{token}" if token else "",
                     "token":   token,
                     "expires": s.get("expiresAt") or s.get("expiry") or "—",
                     "active":  s.get("active", True),
@@ -1883,9 +1890,19 @@ class MochaUploader(QMainWindow):
         exp_lbl = QLabel("Expiration")
         exp_lbl.setObjectName("field_label")
         self.expiry_combo = QComboBox()
-        self.expiry_combo.addItems([
-            "Never", "1h", "6h", "12h", "1d", "3d", "7d", "14d", "30d"
-        ])
+        # Display label → hours (None = no expiry)
+        self._expiry_map = [
+            ("Never",    None),
+            ("1 hour",   1),
+            ("6 hours",  6),
+            ("12 hours", 12),
+            ("1 day",    24),
+            ("3 days",   72),
+            ("7 days",   168),
+            ("14 days",  336),
+            ("30 days",  720),
+        ]
+        self.expiry_combo.addItems([label for label, _ in self._expiry_map])
         exp_row.addWidget(exp_lbl)
         exp_row.addWidget(self.expiry_combo, 1)
         share_opts_lay.addLayout(exp_row)
@@ -1994,8 +2011,8 @@ class MochaUploader(QMainWindow):
         self.speed_label.setText("")
         self._badge("Uploading", "#c8975a")
 
-        expiry = self.expiry_combo.currentText() if self.create_share_cb.isChecked() else "Never"
-        max_dl = self.max_dl_spin.value()        if self.create_share_cb.isChecked() else 0
+        expiry_hours = self._expiry_map[self.expiry_combo.currentIndex()][1] if self.create_share_cb.isChecked() else None
+        max_dl       = self.max_dl_spin.value() if self.create_share_cb.isChecked() else 0
 
         # Build list of (local_abs_path, remote_dest_path) pairs.
         # For a single file the dest is just upload_path/filename.
@@ -2020,7 +2037,7 @@ class MochaUploader(QMainWindow):
 
         self.worker = UploadWorker(
             api_key, base_url, file_pairs,
-            self.create_share_cb.isChecked(), expiry, max_dl
+            self.create_share_cb.isChecked(), expiry_hours, max_dl
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.speed.connect(self._on_speed)
