@@ -18,7 +18,7 @@
 # **WIP**                                             
 |**CURRENT ISSUES**|
 | :---- |
-|<ul><li>Folder upload just dumps all files in root without creating new folder</li><li>Original file names not being listed</li><li>Unable to move files</li><li>Unable to create or view shares</li><li>Large file upload is not working correctly</li><li>Uploading to specific existing folders is not functioning</li></ul>|
+|<ul><li>Debug toggle not working</li><li>Folder upload just dumps all files in root without creating new folder</li><li>Original file names not being listed</li><li>Unable to move files</li><li>Unable to create or view shares</li><li>Large file upload is not working correctly</li><li>Uploading to specific existing folders is not functioning</li></ul>|
 
 
 ## Requirements
