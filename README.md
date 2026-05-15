@@ -42,5 +42,5 @@
 | Create android version | ❌ |
 | Add to context menu (traditiional and Windows 11 (maybe idk how that works yet) for easy uploading | ❌ |
 | Complete control over files, deletion, moving, sharing, etc. | ❌ |
-| Debug and token management in its own tab | ✓ |
+| Debug and token management in its own tab | ❌ |
 
