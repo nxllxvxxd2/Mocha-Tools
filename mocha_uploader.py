@@ -1744,7 +1744,7 @@ class MochaUploader(QMainWindow):
         )
         debug_lay.addWidget(self.debug_cb)
 
-        debug_note = QLabel("When disabled, [DEBUG] messages are suppressed in the console and log file.")
+        debug_note = QLabel("When enabled, all status messages are shown in the console and written to the log file.")
         debug_note.setObjectName("field_label")
         debug_note.setWordWrap(True)
         debug_lay.addWidget(debug_note)
@@ -2040,14 +2040,7 @@ class MochaUploader(QMainWindow):
         self._log(f"✗ Error: {msg}")
 
     def _log(self, msg):
-        is_debug = msg.startswith("[DEBUG]")
-        if is_debug and not self.debug_cb.isChecked():
-            # Still write to file when debug is off — only suppress the UI label
-            try:
-                with open("mocha_uploader.log", "a", encoding="utf-8") as f:
-                    f.write(msg + "\n")
-            except Exception:
-                pass
+        if not (getattr(self, "debug_cb", None) and self.debug_cb.isChecked()):
             return
         self.log_label.setText(msg)
         try:
