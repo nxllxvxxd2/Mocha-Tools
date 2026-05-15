@@ -601,16 +601,23 @@ class UploadWorker(QThread):
                 self.progress.emit(int(uploaded / file_size * 100))
                 self.speed.emit(uploaded / elapsed)
 
-        # ── 3. Complete ───────────────────────────────────────────────────────
-        complete_payload = {"uploadId": upload_id, "parts": parts}
+        # ── 3. Complete ────────────────────────────────────────────────────────────────────
+        complete_payload = {
+            "uploadId":     upload_id,
+            "parts":        parts,
+            "name":         file_name,
+            "originalName": file_name,
+            "path":         dest_path,
+        }
         if server_fid:
             complete_payload["fileId"] = server_fid
 
-        self.status.emit("[DEBUG] Completing multipart upload\u2026")
+        self.status.emit("[DEBUG] Completing multipart upload…")
+        self.status.emit(f"[DEBUG] Complete payload (excl. parts): { {k:v for k,v in complete_payload.items() if k != 'parts'} }")
         try:
             comp_resp = requests.post(
                 f"{self.base_url}/api/files/multipart/complete",
-                headers={**self._headers(), "Content-Type": "application/json"},
+                headers={**self._headers(file_name), "Content-Type": "application/json"},
                 json=complete_payload,
                 timeout=60,
             )
@@ -622,7 +629,6 @@ class UploadWorker(QThread):
         except Exception as e:
             self.status.emit(f"[DEBUG] Complete exception: {e}")
             raise
-
         j       = comp_resp.json()
         file_id = j.get("fileId") or j.get("id") or server_fid
         self.status.emit(f"Multipart complete. File ID: {file_id}")
@@ -1651,17 +1657,18 @@ class MochaUploader(QMainWindow):
             get_api_key=lambda: self.api_key_edit.text().strip()
         )
 
-        self.tabs.addTab(upload_tab, "↑  Upload")
-        self.tabs.addTab(self.files_tab, "📁  Files")
-        self.tabs.currentChanged.connect(self._on_tab_changed)
+        # ── Settings tab ─────────────────────────────────────────────────────
+        settings_tab = QWidget()
+        settings_lay = QVBoxLayout(settings_tab)
+        settings_lay.setContentsMargins(16, 16, 16, 16)
+        settings_lay.setSpacing(14)
 
-        # ── API CONFIGURATION ────────────────────────────────────────────────
-        main.addWidget(self._make_section_header("API Configuration"))
+        # ── API key ───────────────────────────────────────────────────────────
+        settings_lay.addWidget(self._make_section_header("API"))
         api_card = self._make_card()
         api_lay  = QVBoxLayout(api_card)
         api_lay.setSpacing(10)
 
-        # API Key row
         key_row = QHBoxLayout()
         key_lbl = QLabel("API key")
         key_lbl.setObjectName("field_label")
@@ -1675,28 +1682,37 @@ class MochaUploader(QMainWindow):
         key_row.addWidget(self.show_key_cb)
         api_lay.addLayout(key_row)
 
-        # Remove Base URL row (hardcoded)
-        # Upload path
-        path_row = QHBoxLayout()
-        path_lbl = QLabel("Upload path")
-        path_lbl.setObjectName("field_label")
-        self.upload_path_edit = QLineEdit()
-        self.upload_path_edit.setPlaceholderText("/folder/subfolder")
-        self.upload_path_edit.setText("/")
-        self.browse_path_btn = QPushButton("Browse")
-        self.browse_path_btn.setObjectName("browse_btn")
-        self.browse_path_btn.setFixedWidth(68)
-        self.browse_path_btn.clicked.connect(self._browse_remote_path)
-        path_row.addWidget(path_lbl)
-        path_row.addWidget(self.upload_path_edit, 1)
-        path_row.addWidget(self.browse_path_btn)
-        api_lay.addLayout(path_row)
 
-        # Remember key checkbox
         self.remember_cb = QCheckBox("Remember settings across sessions")
         api_lay.addWidget(self.remember_cb)
 
-        main.addWidget(api_card)
+        settings_lay.addWidget(api_card)
+
+        # ── Debug ─────────────────────────────────────────────────────────────
+        settings_lay.addWidget(self._make_section_header("Logging"))
+        debug_card = self._make_card()
+        debug_lay  = QVBoxLayout(debug_card)
+        debug_lay.setSpacing(6)
+
+        self.debug_cb = QCheckBox("Enable debug logging")
+        self.debug_cb.setToolTip(
+            "Show [DEBUG] lines in the status console and log file.\n"
+            "Turn off to see only high-level status messages."
+        )
+        debug_lay.addWidget(self.debug_cb)
+
+        debug_note = QLabel("When disabled, [DEBUG] messages are suppressed in the console and log file.")
+        debug_note.setObjectName("field_label")
+        debug_note.setWordWrap(True)
+        debug_lay.addWidget(debug_note)
+
+        settings_lay.addWidget(debug_card)
+        settings_lay.addStretch()
+
+        self.tabs.addTab(upload_tab, "↑  Upload")
+        self.tabs.addTab(self.files_tab, "📁  Files")
+        self.tabs.addTab(settings_tab, "⚙  Settings")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # ── FILE ─────────────────────────────────────────────────────────────
         main.addWidget(self._make_section_header("File"))
@@ -1809,6 +1825,22 @@ class MochaUploader(QMainWindow):
         self.share_opts_widget.hide()
         main.addWidget(share_card)
 
+        # ── UPLOAD PATH (moved from settings) ────────────────────────────────
+        path_row = QHBoxLayout()
+        path_lbl = QLabel("Upload path")
+        path_lbl.setObjectName("field_label")
+        self.upload_path_edit = QLineEdit()
+        self.upload_path_edit.setPlaceholderText("/folder/subfolder")
+        self.upload_path_edit.setText("/")
+        self.browse_path_btn = QPushButton("Browse")
+        self.browse_path_btn.setObjectName("browse_btn")
+        self.browse_path_btn.setFixedWidth(68)
+        self.browse_path_btn.clicked.connect(self._browse_remote_path)
+        path_row.addWidget(path_lbl)
+        path_row.addWidget(self.upload_path_edit, 1)
+        path_row.addWidget(self.browse_path_btn)
+        main.addLayout(path_row)
+
         # ── UPLOAD BUTTON ─────────────────────────────────────────────────────
         self.upload_btn = QPushButton("↑  Upload file")
         self.upload_btn.setObjectName("upload_btn")
@@ -1867,20 +1899,21 @@ class MochaUploader(QMainWindow):
     # ── Settings ──────────────────────────────────────────────────────────────
     def _load_settings(self):
         self.api_key_edit.setText(self.settings.value("api_key", ""))
-        # self.base_url_edit.setText(self.settings.value("base_url", ""))  # removed
         self.upload_path_edit.setText(self.settings.value("upload_path", "/"))
         remember = self.settings.value("remember", False, type=bool)
         self.remember_cb.setChecked(remember)
+        debug = self.settings.value("debug", False, type=bool)
+        self.debug_cb.setChecked(debug)
 
     def _save_settings(self):
+        # Always persist debug toggle regardless of remember_cb
+        self.settings.setValue("debug", self.debug_cb.isChecked())
         if self.remember_cb.isChecked():
             self.settings.setValue("api_key",     self.api_key_edit.text())
-            # self.settings.setValue("base_url",    self.base_url_edit.text())  # removed
             self.settings.setValue("upload_path", self.upload_path_edit.text())
             self.settings.setValue("remember",    True)
         else:
             self.settings.remove("api_key")
-            # self.settings.remove("base_url")  # removed
             self.settings.remove("upload_path")
             self.settings.setValue("remember", False)
 
@@ -1980,6 +2013,9 @@ class MochaUploader(QMainWindow):
         self._log(f"✗ Error: {msg}")
 
     def _log(self, msg):
+        # If debug is disabled, suppress ALL logging (UI and file)
+        if not self.debug_cb.isChecked():
+            return
         self.log_label.setText(msg)
         try:
             with open("mocha_uploader.log", "a", encoding="utf-8") as f:
@@ -1999,6 +2035,9 @@ class MochaUploader(QMainWindow):
         # Auto-refresh the Files tab when switched to (if API key is present)
         if index == 1 and self.api_key_edit.text().strip():
             self.files_tab._refresh()
+        # Auto-save settings when leaving Settings tab
+        elif index != 2:
+            self._save_settings()
 
     def closeEvent(self, event):
         self._save_settings()
