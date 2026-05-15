@@ -24,7 +24,9 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QProgressBar,
     QFileDialog, QFrame, QSpinBox, QComboBox, QScrollArea,
-    QSizePolicy, QMessageBox
+    QSizePolicy, QMessageBox, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QHeaderView, QMenu, QAbstractItemView, QInputDialog, QToolBar,
+    QSplitter
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QMimeData, QUrl,
@@ -279,6 +281,92 @@ QScrollBar::handle:vertical {
     min-height: 20px;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+/* Tab widget */
+QTabWidget::pane {
+    border: none;
+    background: transparent;
+}
+QTabBar::tab {
+    background: #1a1c1f;
+    color: #9ca3af;
+    border: 1px solid #2a2d32;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    padding: 7px 20px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 2px;
+}
+QTabBar::tab:selected {
+    background: #111214;
+    color: #c8975a;
+    border-bottom: 2px solid #c8975a;
+}
+QTabBar::tab:hover:!selected { background: #22252a; color: #e0e0e0; }
+
+/* File browser tree */
+QTreeWidget {
+    background: #0e1012;
+    border: 1px solid #2a2d32;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 12px;
+    outline: none;
+    show-decoration-selected: 1;
+}
+QTreeWidget::item {
+    padding: 5px 4px;
+    border-bottom: 1px solid #1a1c1f;
+}
+QTreeWidget::item:selected {
+    background: #c8975a22;
+    color: #e0e0e0;
+}
+QTreeWidget::item:hover:!selected { background: #1a1c1f; }
+QHeaderView::section {
+    background: #1a1c1f;
+    color: #8a8f98;
+    border: none;
+    border-right: 1px solid #2a2d32;
+    border-bottom: 1px solid #2a2d32;
+    padding: 5px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
+/* Toolbar */
+QToolBar {
+    background: transparent;
+    border: none;
+    spacing: 4px;
+    padding: 0px;
+}
+QPushButton#tb_btn {
+    background: #1e2024;
+    color: #c8975a;
+    border: 1px solid #2a2d32;
+    border-radius: 5px;
+    padding: 5px 12px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QPushButton#tb_btn:hover { background: #262930; border-color: #c8975a55; }
+QPushButton#tb_btn:pressed { background: #111214; }
+QPushButton#tb_btn:disabled { color: #404449; border-color: #1e2024; }
+
+QPushButton#tb_btn_danger {
+    background: #1e2024;
+    color: #f87171;
+    border: 1px solid #2a2d32;
+    border-radius: 5px;
+    padding: 5px 12px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QPushButton#tb_btn_danger:hover { background: #2a1a1a; border-color: #f8717155; }
+QPushButton#tb_btn_danger:disabled { color: #404449; border-color: #1e2024; }
 """
 
 # ── Upload Worker ────────────────────────────────────────────────────────────
@@ -971,6 +1059,583 @@ class FolderBrowserDialog(QDialog):
         self.accept()
 
 
+# ── Files API Worker ─────────────────────────────────────────────────────────
+class FilesWorker(QThread):
+    """Generic background worker for Files-tab API operations."""
+    done    = pyqtSignal(object)   # result payload (varies by op)
+    error   = pyqtSignal(str)
+
+    def __init__(self, op, api_key, base_url, **kwargs):
+        super().__init__()
+        self.op       = op          # 'list' | 'delete' | 'move' | 'share' | 'mkdir' | 'shares'
+        self.api_key  = api_key
+        self.base_url = base_url.rstrip("/")
+        self.kwargs   = kwargs
+
+    def _h(self):
+        return {"Authorization": f"Bearer {self.api_key}",
+                "Content-Type":  "application/json"}
+
+    def run(self):
+        try:
+            if self.op == "list":
+                self._list()
+            elif self.op == "delete":
+                self._delete()
+            elif self.op == "move":
+                self._move()
+            elif self.op == "share":
+                self._share()
+            elif self.op == "mkdir":
+                self._mkdir()
+            elif self.op == "shares":
+                self._list_shares()
+            elif self.op == "delete_folder":
+                self._delete_folder()
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _list(self):
+        path = self.kwargs.get("path", "/")
+        resp = requests.get(
+            f"{self.base_url}/api/files",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            params={"path": path, "includeSubfolders": "0"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        self.done.emit({"op": "list", "path": path, "data": resp.json()})
+
+    def _delete(self):
+        file_name = self.kwargs["file_name"]   # full remote path / filename
+        resp = requests.delete(
+            f"{self.base_url}/api/files/{requests.utils.quote(file_name, safe='')}",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        self.done.emit({"op": "delete", "file_name": file_name})
+
+    def _delete_folder(self):
+        path = self.kwargs["path"]
+        resp = requests.delete(
+            f"{self.base_url}/api/files/folders",
+            headers=self._h(),
+            json={"path": path},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        self.done.emit({"op": "delete_folder", "path": path})
+
+    def _move(self):
+        file_id  = self.kwargs.get("file_id")
+        new_path = self.kwargs["new_path"]
+        payload  = {"newPath": new_path}
+        if file_id:
+            payload["fileId"] = file_id
+        else:
+            payload["sourcePath"] = self.kwargs.get("source_path", "")
+        resp = requests.post(
+            f"{self.base_url}/api/files/move",
+            headers=self._h(),
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        self.done.emit({"op": "move", "new_path": new_path})
+
+    def _share(self):
+        file_id  = self.kwargs["file_id"]
+        expiry   = self.kwargs.get("expiry", "")
+        max_dl   = self.kwargs.get("max_downloads", 0)
+        payload  = {"fileId": file_id}
+        if expiry and expiry != "Never":
+            payload["expiresIn"] = expiry
+        if max_dl > 0:
+            payload["maxDownloads"] = max_dl
+        resp = requests.post(
+            f"{self.base_url}/api/shares",
+            headers=self._h(),
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data  = resp.json()
+        token = data.get("token") or (data.get("share") or {}).get("token", "")
+        url   = f"{self.base_url}/s/{token}" if token else ""
+        self.done.emit({"op": "share", "url": url, "token": token})
+
+    def _mkdir(self):
+        path = self.kwargs["path"]
+        resp = requests.post(
+            f"{self.base_url}/api/files/folders",
+            headers=self._h(),
+            json={"path": path},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        self.done.emit({"op": "mkdir", "path": path})
+
+    def _list_shares(self):
+        resp = requests.get(
+            f"{self.base_url}/api/shares",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        self.done.emit({"op": "shares", "data": resp.json()})
+
+
+# ── Files Browser Tab ─────────────────────────────────────────────────────────
+class FilesBrowserTab(QWidget):
+    """
+    The 'Files' tab — lists remote files and folders, allows:
+      • Navigate folders (double-click or breadcrumb)
+      • Create folder
+      • Delete file or folder
+      • Move file
+      • Create / copy share link
+    """
+
+    def __init__(self, get_api_key, parent=None):
+        super().__init__(parent)
+        self.get_api_key  = get_api_key   # callable → current API key string
+        self.base_url     = HARDCODED_BASE_URL
+        self.current_path = "/"
+        self._workers     = []            # keep refs alive
+        self._shares_map  = {}            # fileId → share token/url
+
+        self._build_ui()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(8)
+
+        # ── Breadcrumb / path bar ────────────────────────────────────────────
+        path_row = QHBoxLayout()
+        path_row.setSpacing(6)
+
+        self.path_edit = QLineEdit("/")
+        self.path_edit.setPlaceholderText("/path/to/folder")
+        self.path_edit.returnPressed.connect(self._on_path_entered)
+
+        go_btn = QPushButton("Go")
+        go_btn.setObjectName("tb_btn")
+        go_btn.setFixedWidth(40)
+        go_btn.clicked.connect(self._on_path_entered)
+
+        up_btn = QPushButton("↑")
+        up_btn.setObjectName("tb_btn")
+        up_btn.setFixedWidth(32)
+        up_btn.setToolTip("Go up one level")
+        up_btn.clicked.connect(self._go_up)
+
+        path_row.addWidget(QLabel("Path:"))
+        path_row.addWidget(self.path_edit, 1)
+        path_row.addWidget(go_btn)
+        path_row.addWidget(up_btn)
+        outer.addLayout(path_row)
+
+        # ── Toolbar ──────────────────────────────────────────────────────────
+        tb = QHBoxLayout()
+        tb.setSpacing(4)
+
+        self.refresh_btn  = self._tb("↺  Refresh",     self._refresh)
+        self.mkdir_btn    = self._tb("+ New Folder",    self._create_folder)
+        self.move_btn     = self._tb("↦  Move",         self._move_selected)
+        self.share_btn    = self._tb("⤴  Share",        self._share_selected)
+        self.delete_btn   = self._tb("✕  Delete",       self._delete_selected, danger=True)
+
+        for btn in (self.refresh_btn, self.mkdir_btn, self.move_btn,
+                    self.share_btn, self.delete_btn):
+            tb.addWidget(btn)
+        tb.addStretch()
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setStyleSheet(
+            "color:#9ca3af; font-size:11px; background:transparent;")
+        tb.addWidget(self.status_lbl)
+
+        outer.addLayout(tb)
+
+        # ── File tree ────────────────────────────────────────────────────────
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(5)
+        self.tree.setHeaderLabels(["Name", "Size", "Type", "Shared", "Expires"])
+        self.tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setSortingEnabled(True)
+        self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.tree.itemDoubleClicked.connect(self._on_double_click)
+        self.tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._context_menu)
+
+        # Column widths
+        hdr = self.tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+
+        outer.addWidget(self.tree, 1)
+
+        # ── Share result bar ─────────────────────────────────────────────────
+        self.share_bar = QLabel("")
+        self.share_bar.setObjectName("log_console")
+        self.share_bar.setWordWrap(True)
+        self.share_bar.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse |
+            Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.share_bar.setOpenExternalLinks(True)
+        self.share_bar.hide()
+        outer.addWidget(self.share_bar)
+
+        self._set_action_btns_enabled(False)
+
+    def _tb(self, label, slot, danger=False):
+        btn = QPushButton(label)
+        btn.setObjectName("tb_btn_danger" if danger else "tb_btn")
+        btn.clicked.connect(slot)
+        return btn
+
+    # ── Navigation ────────────────────────────────────────────────────────────
+    def _on_path_entered(self):
+        path = self.path_edit.text().strip() or "/"
+        self._navigate(path)
+
+    def _go_up(self):
+        parts = self.current_path.strip("/").split("/")
+        parent = "/" + "/".join(parts[:-1]) if len(parts) > 1 else "/"
+        self._navigate(parent)
+
+    def _navigate(self, path):
+        api_key = self.get_api_key()
+        if not api_key:
+            self._status("⚠ Enter your API key in the Upload tab first.")
+            return
+        self.current_path = path
+        self.path_edit.setText(path)
+        self._status("Loading…")
+        self.tree.clear()
+        self.share_bar.hide()
+
+        # Fetch file list and shares in parallel
+        self._run_worker("list", path=path)
+        self._run_worker("shares")
+
+    def _refresh(self):
+        self._navigate(self.current_path)
+
+    # ── Worker dispatch ───────────────────────────────────────────────────────
+    def _run_worker(self, op, **kwargs):
+        api_key = self.get_api_key()
+        w = FilesWorker(op, api_key, self.base_url, **kwargs)
+        w.done.connect(self._on_worker_done)
+        w.error.connect(self._on_worker_error)
+        w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
+        self._workers.append(w)
+        w.start()
+
+    def _on_worker_done(self, result):
+        op = result.get("op")
+        if op == "list":
+            self._populate(result["path"], result["data"])
+        elif op == "shares":
+            self._index_shares(result["data"])
+            self._refresh_share_indicators()
+        elif op in ("delete", "delete_folder", "move", "mkdir"):
+            self._status("✓ Done")
+            self._refresh()
+        elif op == "share":
+            url = result.get("url", "")
+            self._status(f"✓ Share created")
+            if url:
+                self.share_bar.setText(
+                    f'Share link: <a href="{url}" style="color:#c8975a;">{url}</a>')
+                self.share_bar.show()
+            self._refresh()
+
+    def _on_worker_error(self, msg):
+        self._status(f"✗ {msg}")
+        QMessageBox.warning(self, "Error", msg)
+
+    # ── Populate tree ─────────────────────────────────────────────────────────
+    def _populate(self, path, data):
+        self.tree.setSortingEnabled(False)
+        self.tree.clear()
+
+        folders = []
+        files   = []
+
+        if isinstance(data, dict):
+            raw_folders = data.get("folders") or []
+            raw_files   = data.get("files")   or []
+        elif isinstance(data, list):
+            raw_files   = data
+            raw_folders = []
+        else:
+            raw_files = raw_folders = []
+
+        # ── Folders ──
+        for entry in raw_folders:
+            if isinstance(entry, str):
+                name     = entry.rstrip("/").split("/")[-1]
+                fullpath = entry
+                folders.append({"name": name, "path": fullpath})
+            elif isinstance(entry, dict):
+                name = (entry.get("name") or entry.get("originalName")
+                        or entry.get("path", "").rstrip("/").split("/")[-1])
+                fullpath = entry.get("path") or f"{path.rstrip('/')}/{name}"
+                folders.append({"name": name, "path": fullpath, **entry})
+
+        # ── Files ──
+        for entry in raw_files:
+            if isinstance(entry, dict):
+                # Skip entries that look like folders in a flat list
+                if entry.get("type") == "folder" or entry.get("isFolder"):
+                    name     = (entry.get("name") or
+                                entry.get("path", "").rstrip("/").split("/")[-1])
+                    fullpath = entry.get("path") or f"{path.rstrip('/')}/{name}"
+                    folders.append({"name": name, "path": fullpath, **entry})
+                else:
+                    files.append(entry)
+
+        # Add ".." row
+        if path and path != "/":
+            up_item = QTreeWidgetItem(["↑  ..", "", "folder", "", ""])
+            up_item.setData(0, Qt.ItemDataRole.UserRole,
+                            {"_type": "up", "path": self._parent_path(path)})
+            up_item.setForeground(0, QColor("#9ca3af"))
+            self.tree.addTopLevelItem(up_item)
+
+        # Add folder rows
+        for f in sorted(folders, key=lambda x: x["name"].lower()):
+            item = QTreeWidgetItem([
+                f"📁  {f['name']}", "", "folder", "", ""
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole, {"_type": "folder", **f})
+            item.setForeground(0, QColor("#c8975a"))
+            self.tree.addTopLevelItem(item)
+
+        # Add file rows
+        for f in sorted(files, key=lambda x: (
+                x.get("name") or x.get("originalName") or "").lower()):
+            name    = (f.get("name") or f.get("originalName")
+                       or f.get("file_name") or "")
+            size    = f.get("size") or f.get("fileSize") or 0
+            fid     = f.get("id") or f.get("fileId") or ""
+            expires = f.get("expiresAt") or f.get("expiry") or "—"
+            if expires and expires != "—":
+                expires = expires[:10] if len(expires) > 10 else expires
+
+            item = QTreeWidgetItem([
+                f"  {name}",
+                UploadWorker._fmt_size(int(size)) if size else "—",
+                "file",
+                "",          # shared — filled after shares load
+                expires,
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole,
+                         {"_type": "file", "name": name, "id": fid,
+                          "path": f.get("path") or f"{path.rstrip('/')}/{name}",
+                          **f})
+            self.tree.addTopLevelItem(item)
+
+        self.tree.setSortingEnabled(True)
+        self._status(f"{len(folders)} folder{'s' if len(folders)!=1 else ''}, "
+                     f"{len(files)} file{'s' if len(files)!=1 else ''}")
+        self._set_action_btns_enabled(False)
+        self._refresh_share_indicators()
+
+    def _index_shares(self, data):
+        """Build fileId → share_url map from GET /api/shares response."""
+        self._shares_map = {}
+        items = data if isinstance(data, list) else data.get("shares", [])
+        for s in items:
+            fid   = (s.get("fileId") or
+                     (s.get("file") or {}).get("id") or "")
+            token = s.get("token", "")
+            if fid:
+                self._shares_map[fid] = {
+                    "url":     f"{self.base_url}/s/{token}" if token else "",
+                    "token":   token,
+                    "expires": s.get("expiresAt") or s.get("expiry") or "—",
+                    "active":  s.get("active", True),
+                }
+
+    def _refresh_share_indicators(self):
+        """Update the Shared column for all file rows based on _shares_map."""
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            item = root.child(i)
+            meta = item.data(0, Qt.ItemDataRole.UserRole) or {}
+            if meta.get("_type") != "file":
+                continue
+            fid = meta.get("id") or meta.get("fileId") or ""
+            if fid in self._shares_map:
+                share = self._shares_map[fid]
+                label = "● Shared" if share.get("active", True) else "○ Inactive"
+                color = "#4ade80" if share.get("active", True) else "#9ca3af"
+                item.setText(3, label)
+                item.setForeground(3, QColor(color))
+                if item.text(4) in ("—", ""):
+                    exp = share.get("expires", "—")
+                    if exp and exp != "—":
+                        item.setText(4, exp[:10] if len(exp) > 10 else exp)
+            else:
+                item.setText(3, "")
+
+    # ── Selection ─────────────────────────────────────────────────────────────
+    def _on_selection_changed(self):
+        items = self._selected_items()
+        has   = len(items) > 0
+        single_file = (len(items) == 1 and
+                       items[0].data(0, Qt.ItemDataRole.UserRole).get("_type") == "file")
+        self.move_btn.setEnabled(single_file)
+        self.share_btn.setEnabled(single_file)
+        self.delete_btn.setEnabled(has)
+
+    def _set_action_btns_enabled(self, enabled):
+        self.move_btn.setEnabled(enabled)
+        self.share_btn.setEnabled(enabled)
+        self.delete_btn.setEnabled(enabled)
+
+    def _selected_items(self):
+        return [i for i in self.tree.selectedItems()
+                if (i.data(0, Qt.ItemDataRole.UserRole) or {}).get("_type")
+                in ("file", "folder")]
+
+    def _on_double_click(self, item, _col):
+        meta = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        t    = meta.get("_type")
+        if t in ("folder", "up"):
+            self._navigate(meta["path"])
+
+    # ── Actions ───────────────────────────────────────────────────────────────
+    def _create_folder(self):
+        name, ok = QInputDialog.getText(self, "New Folder", "Folder name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        path = f"{self.current_path.rstrip('/')}/{name}"
+        self._status(f"Creating {path}…")
+        self._run_worker("mkdir", path=path)
+
+    def _delete_selected(self):
+        items = self._selected_items()
+        if not items:
+            return
+        names = [item.text(0).strip().lstrip("📁").lstrip() for item in items]
+        msg   = (f"Delete {names[0]!r}?"
+                 if len(names) == 1
+                 else f"Delete {len(names)} items?")
+        if QMessageBox.question(self, "Confirm Delete", msg,
+                                QMessageBox.StandardButton.Yes |
+                                QMessageBox.StandardButton.No
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        for item in items:
+            meta = item.data(0, Qt.ItemDataRole.UserRole) or {}
+            if meta.get("_type") == "folder":
+                self._run_worker("delete_folder", path=meta.get("path", ""))
+            else:
+                file_name = meta.get("name") or meta.get("path", "").lstrip("/")
+                self._run_worker("delete", file_name=file_name)
+        self._status("Deleting…")
+
+    def _move_selected(self):
+        items = self._selected_items()
+        if len(items) != 1:
+            return
+        meta  = items[0].data(0, Qt.ItemDataRole.UserRole) or {}
+        fid   = meta.get("id") or meta.get("fileId") or ""
+        src   = meta.get("path") or meta.get("name") or ""
+        name  = meta.get("name") or src.rstrip("/").split("/")[-1]
+
+        dlg = FolderBrowserDialog(self.get_api_key(), self.base_url,
+                                  self.current_path, parent=self)
+        dlg.setWindowTitle("Move — choose destination folder")
+        if not dlg.exec():
+            return
+        dest_folder = dlg.selected.rstrip("/")
+        dest_path   = f"{dest_folder}/{name}"
+        self._status(f"Moving to {dest_path}…")
+        self._run_worker("move", file_id=fid, source_path=src, new_path=dest_path)
+
+    def _share_selected(self):
+        items = self._selected_items()
+        if len(items) != 1:
+            return
+        meta = items[0].data(0, Qt.ItemDataRole.UserRole) or {}
+        fid  = meta.get("id") or meta.get("fileId") or ""
+        name = meta.get("name") or ""
+
+        if fid in self._shares_map:
+            existing_url = self._shares_map[fid].get("url", "")
+            ans = QMessageBox.question(
+                self, "Already Shared",
+                f"{name!r} already has a share link.\n\n{existing_url}\n\nCreate a new link anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
+                QMessageBox.StandardButton.Cancel,
+            )
+            if ans == QMessageBox.StandardButton.No:
+                self.share_bar.setText(
+                    f'Share link: <a href="{existing_url}" style="color:#c8975a;">'
+                    f'{existing_url}</a>')
+                self.share_bar.show()
+                return
+            elif ans == QMessageBox.StandardButton.Cancel:
+                return
+
+        expiry, ok = QInputDialog.getItem(
+            self, "Share Expiry", "Expiration:",
+            ["Never", "1h", "6h", "12h", "1d", "3d", "7d", "14d", "30d"],
+            editable=False,
+        )
+        if not ok:
+            return
+
+        self._status(f"Creating share for {name!r}…")
+        self._run_worker("share", file_id=fid, expiry=expiry)
+
+    def _context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+        meta = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        if meta.get("_type") not in ("file", "folder"):
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background:#1a1c1f; border:1px solid #2a2d32;
+                    color:#e0e0e0; font-size:12px; }
+            QMenu::item { padding:6px 24px; }
+            QMenu::item:selected { background:#c8975a33; }
+        """)
+
+        if meta.get("_type") == "file":
+            menu.addAction("⤴  Share",  self._share_selected)
+            menu.addAction("↦  Move",   self._move_selected)
+        menu.addSeparator()
+        menu.addAction("✕  Delete", self._delete_selected)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+    def _status(self, msg):
+        self.status_lbl.setText(msg)
+
+    @staticmethod
+    def _parent_path(path):
+        parts = path.strip("/").split("/")
+        return "/" + "/".join(parts[:-1]) if len(parts) > 1 else "/"
+
+
 # ── Main Window ──────────────────────────────────────────────────────────────
 class MochaUploader(QMainWindow):
     def __init__(self):
@@ -991,6 +1656,16 @@ class MochaUploader(QMainWindow):
         root.setObjectName("root")
         self.setCentralWidget(root)
 
+        root_lay = QVBoxLayout(root)
+        root_lay.setContentsMargins(0, 0, 0, 0)
+        root_lay.setSpacing(0)
+
+        # ── Tab widget ───────────────────────────────────────────────────────
+        self.tabs = QTabWidget()
+        root_lay.addWidget(self.tabs)
+
+        # ── Upload tab ───────────────────────────────────────────────────────
+        upload_tab = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1003,17 +1678,26 @@ class MochaUploader(QMainWindow):
 
         scroll.setWidget(inner)
 
-        root_lay = QVBoxLayout(root)
-        root_lay.setContentsMargins(0, 0, 0, 0)
-        root_lay.addWidget(scroll)
+        upload_tab_lay = QVBoxLayout(upload_tab)
+        upload_tab_lay.setContentsMargins(0, 0, 0, 0)
+        upload_tab_lay.addWidget(scroll)
 
-        # ── API CONFIGURATION ────────────────────────────────────────────────
-        main.addWidget(self._make_section_header("API Configuration"))
+        # ── Files tab ────────────────────────────────────────────────────────
+        self.files_tab = FilesBrowserTab(
+            get_api_key=lambda: self.api_key_edit.text().strip()
+        )
+
+        # ── Settings tab ─────────────────────────────────────────────────────
+        settings_tab = QWidget()
+        settings_lay = QVBoxLayout(settings_tab)
+        settings_lay.setContentsMargins(16, 16, 16, 16)
+        settings_lay.setSpacing(14)
+
+        settings_lay.addWidget(self._make_section_header("API"))
         api_card = self._make_card()
         api_lay  = QVBoxLayout(api_card)
         api_lay.setSpacing(10)
 
-        # API Key row
         key_row = QHBoxLayout()
         key_lbl = QLabel("API key")
         key_lbl.setObjectName("field_label")
@@ -1027,8 +1711,6 @@ class MochaUploader(QMainWindow):
         key_row.addWidget(self.show_key_cb)
         api_lay.addLayout(key_row)
 
-        # Remove Base URL row (hardcoded)
-        # Upload path
         path_row = QHBoxLayout()
         path_lbl = QLabel("Upload path")
         path_lbl.setObjectName("field_label")
@@ -1044,11 +1726,36 @@ class MochaUploader(QMainWindow):
         path_row.addWidget(self.browse_path_btn)
         api_lay.addLayout(path_row)
 
-        # Remember key checkbox
         self.remember_cb = QCheckBox("Remember settings across sessions")
         api_lay.addWidget(self.remember_cb)
 
-        main.addWidget(api_card)
+        settings_lay.addWidget(api_card)
+
+        # ── Debug ─────────────────────────────────────────────────────────────
+        settings_lay.addWidget(self._make_section_header("Logging"))
+        debug_card = self._make_card()
+        debug_lay  = QVBoxLayout(debug_card)
+        debug_lay.setSpacing(6)
+
+        self.debug_cb = QCheckBox("Enable debug logging")
+        self.debug_cb.setToolTip(
+            "Show [DEBUG] lines in the status console and log file.\n"
+            "Turn off to see only high-level status messages."
+        )
+        debug_lay.addWidget(self.debug_cb)
+
+        debug_note = QLabel("When disabled, [DEBUG] messages are suppressed in the console and log file.")
+        debug_note.setObjectName("field_label")
+        debug_note.setWordWrap(True)
+        debug_lay.addWidget(debug_note)
+
+        settings_lay.addWidget(debug_card)
+        settings_lay.addStretch()
+
+        self.tabs.addTab(upload_tab, "↑  Upload")
+        self.tabs.addTab(self.files_tab, "📁  Files")
+        self.tabs.addTab(settings_tab, "⚙  Settings")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # ── FILE ─────────────────────────────────────────────────────────────
         main.addWidget(self._make_section_header("File"))
@@ -1219,20 +1926,21 @@ class MochaUploader(QMainWindow):
     # ── Settings ──────────────────────────────────────────────────────────────
     def _load_settings(self):
         self.api_key_edit.setText(self.settings.value("api_key", ""))
-        # self.base_url_edit.setText(self.settings.value("base_url", ""))  # removed
         self.upload_path_edit.setText(self.settings.value("upload_path", "/"))
         remember = self.settings.value("remember", False, type=bool)
         self.remember_cb.setChecked(remember)
+        debug = self.settings.value("debug", False, type=bool)
+        self.debug_cb.setChecked(debug)
 
     def _save_settings(self):
+        # Always persist debug toggle regardless of remember_cb
+        self.settings.setValue("debug", self.debug_cb.isChecked())
         if self.remember_cb.isChecked():
             self.settings.setValue("api_key",     self.api_key_edit.text())
-            # self.settings.setValue("base_url",    self.base_url_edit.text())  # removed
             self.settings.setValue("upload_path", self.upload_path_edit.text())
             self.settings.setValue("remember",    True)
         else:
             self.settings.remove("api_key")
-            # self.settings.remove("base_url")  # removed
             self.settings.remove("upload_path")
             self.settings.setValue("remember", False)
 
@@ -1332,6 +2040,15 @@ class MochaUploader(QMainWindow):
         self._log(f"✗ Error: {msg}")
 
     def _log(self, msg):
+        is_debug = msg.startswith("[DEBUG]")
+        if is_debug and not self.debug_cb.isChecked():
+            # Still write to file when debug is off — only suppress the UI label
+            try:
+                with open("mocha_uploader.log", "a", encoding="utf-8") as f:
+                    f.write(msg + "\n")
+            except Exception:
+                pass
+            return
         self.log_label.setText(msg)
         try:
             with open("mocha_uploader.log", "a", encoding="utf-8") as f:
@@ -1347,8 +2064,19 @@ class MochaUploader(QMainWindow):
             f"font-weight: 600; padding: 2px 10px;"
         )
 
+    def _on_tab_changed(self, index):
+        # Auto-refresh the Files tab when switched to (if API key is present)
+        if index == 1 and self.api_key_edit.text().strip():
+            self.files_tab._refresh()
+        # Auto-save settings when leaving Settings tab
+        elif index != 2:
+            self._save_settings()
+
     def closeEvent(self, event):
         self._save_settings()
+        # Stop any running file-tab workers
+        for w in list(self.files_tab._workers):
+            w.quit()
         super().closeEvent(event)
 
 
