@@ -38,8 +38,8 @@ from PyQt6.QtGui import (
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
-CHUNK_THRESHOLD = 20 * 1024 * 1024   # 20 MB  → use multipart above this (Cloudflare rejects larger direct POSTs)
-CHUNK_SIZE      = 20 * 1024 * 1024   # 20 MB chunks
+CHUNK_THRESHOLD = 50 * 1024 * 1024   # 50 MB  → use multipart above this (API direct upload limit)
+CHUNK_SIZE      = 50 * 1024 * 1024   # 50 MB chunks (API max per chunk is 200 MB)
 APP_NAME        = "MochaUploader"
 ORG_NAME        = "Mocha"
 HARDCODED_BASE_URL = "https://mocha.my"
@@ -419,15 +419,21 @@ class UploadWorker(QThread):
             try:
                 file_size = os.path.getsize(local_path)
                 self.status.emit(f"{prefix}{file_name}  ({self._fmt_size(file_size)})")
+                self.status.emit(f"[DEBUG] Local path: {local_path}")
+                self.status.emit(f"[DEBUG] Remote dest: {dest_path}")
+                self.status.emit(f"[DEBUG] File size (bytes): {file_size}  threshold: {CHUNK_THRESHOLD}")
 
                 if file_size <= CHUNK_THRESHOLD:
+                    self.status.emit(f"[DEBUG] Strategy: simple upload (≤ {self._fmt_size(CHUNK_THRESHOLD)})")
                     file_id = self._simple_upload(file_size, local_path, dest_path)
                 else:
+                    self.status.emit(f"[DEBUG] Strategy: multipart upload (> {self._fmt_size(CHUNK_THRESHOLD)})")
                     file_id = self._multipart_upload(file_size, local_path, dest_path)
 
                 if self._cancel or file_id is None:
                     return
 
+                self.status.emit(f"[DEBUG] File ID returned to run(): {file_id}")
                 last_file_id = file_id
 
                 if self.create_share and idx == total_files:
@@ -445,7 +451,7 @@ class UploadWorker(QThread):
     # ── simple upload (≤ 20 MB) ──────────────────────────────────────────────
     def _simple_upload(self, file_size, local_path, dest_path):
         file_name  = os.path.basename(local_path)
-        dest_dir   = "/".join(dest_path.rstrip("/").split("/")[:-1]) or "/"
+        dest_dir   = "/".join(dest_path.rstrip("/").split("/")[:-1]) or "/"  # sent as x-file-path header
         url        = f"{self.base_url}/api/files"
 
         start    = time.time()
@@ -468,22 +474,37 @@ class UploadWorker(QThread):
                 self.speed.emit(uploaded / elapsed)
         data = b"".join(chunks)
 
+        import mimetypes
+        mime_type = mimetypes.guess_type(local_path)[0] or "application/octet-stream"
+        # Ensure dest_dir ends with a trailing slash as the API expects (e.g. /test/)
+        dest_dir_hdr = dest_dir.rstrip("/") + "/"
+
+        req_headers = self._headers(file_name)
+        req_headers["x-file-path"]    = dest_dir_hdr
+        req_headers["x-file-type"]    = mime_type
+        req_headers["Content-Length"] = str(file_size)
+
         self.status.emit(f"[DEBUG] Upload URL: {url}")
-        self.status.emit(f"[DEBUG] Dest path: {dest_path}")
-        self.status.emit(f"[DEBUG] File name: {file_name}")
-        debug_headers = dict(self._headers(file_name))
+        self.status.emit(f"[DEBUG] Full dest path: {dest_path}")
+        self.status.emit(f"[DEBUG] x-file-path header: {dest_dir_hdr}")
+        self.status.emit(f"[DEBUG] x-file-name header: {file_name}")
+        self.status.emit(f"[DEBUG] x-file-type header: {mime_type}")
+        self.status.emit(f"[DEBUG] Content-Length: {file_size}  ({self._fmt_size(file_size)})")
+        debug_headers = dict(req_headers)
         debug_headers["Authorization"] = "(hidden)"
-        self.status.emit(f"[DEBUG] Headers: {debug_headers}")
+        self.status.emit(f"[DEBUG] Request headers: {debug_headers}")
+        t0 = time.time()
         try:
             resp = requests.post(
                 url,
-                headers=self._headers(file_name),
-                files={
-                    "file": (file_name, data, "application/octet-stream"),
-                    "path": (None, dest_path),
-                },
+                headers=req_headers,
+                data=data,
                 timeout=120,
             )
+            elapsed_ms = (time.time() - t0) * 1000
+            self.status.emit(f"[DEBUG] Response status: {resp.status_code}  elapsed: {elapsed_ms:.0f} ms")
+            self.status.emit(f"[DEBUG] Response headers: {dict(resp.headers)}")
+            self.status.emit(f"[DEBUG] Response body: {resp.text[:500]}")
             resp.raise_for_status()
         except requests.HTTPError as e:
             self.status.emit(f"[DEBUG] HTTPError: {e}")
@@ -496,6 +517,7 @@ class UploadWorker(QThread):
 
         j       = resp.json()
         file_id = j.get("fileId") or j.get("id") or j.get("file", {}).get("id")
+        self.status.emit(f"[DEBUG] Parsed file ID: {file_id}  full JSON: {j}")
         self.status.emit(f"Upload complete. File ID: {file_id}")
         self.progress.emit(100)
 
@@ -764,15 +786,30 @@ class UploadWorker(QThread):
         if self.share_max_downloads > 0:
             payload["maxDownloads"] = self.share_max_downloads
 
-        resp = requests.post(
-            f"{self.base_url}/api/shares",
-            headers={**self._headers(), "Content-Type": "application/json"},
-            json=payload,
-            timeout=30,
-        )
-        resp.raise_for_status()
+        share_url_endpoint = f"{self.base_url}/api/shares"
+        self.status.emit(f"[DEBUG] Share URL: {share_url_endpoint}")
+        self.status.emit(f"[DEBUG] Share payload: {payload}")
+        try:
+            resp = requests.post(
+                share_url_endpoint,
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json=payload,
+                timeout=30,
+            )
+            self.status.emit(f"[DEBUG] Share response status: {resp.status_code}")
+            self.status.emit(f"[DEBUG] Share response body: {resp.text[:500]}")
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            self.status.emit(f"[DEBUG] Share HTTPError: {e}")
+            self.status.emit(f"[DEBUG] Share response status: {getattr(e.response, 'status_code', None)}")
+            self.status.emit(f"[DEBUG] Share response content: {getattr(e.response, 'text', None)}")
+            raise
+        except Exception as e:
+            self.status.emit(f"[DEBUG] Share exception: {e}")
+            raise
         data  = resp.json()
         token = data.get("token") or data.get("share", {}).get("token", "")
+        self.status.emit(f"[DEBUG] Share token: {token!r}  full JSON: {data}")
         return f"{self.base_url}/s/{token}" if token else "(no share URL returned)"
 
     @staticmethod
@@ -970,23 +1007,11 @@ class FolderBrowserDialog(QDialog):
             data = resp.json()
         except Exception as e:
             self.status_lbl.setText(f"Error: {e}")
-            # Log raw response for debugging
             if hasattr(e, "response") and e.response is not None:
                 self.status_lbl.setText(
                     f"Error {e.response.status_code}: {e.response.text[:200]}"
                 )
             return
-
-        # ── DEBUG: show raw API response shape in the dialog status label ──────
-        import json as _json
-        if isinstance(data, dict):
-            preview = f"keys={list(data.keys())}  sample={_json.dumps(data)[:300]}"
-        elif isinstance(data, list):
-            preview = f"list[{len(data)}]  first={_json.dumps(data[0])[:200] if data else '(empty)'}"
-        else:
-            preview = repr(data)[:300]
-        self.status_lbl.setText(f"[DEBUG] {preview}")
-        self.status_lbl.setWordWrap(True)
 
         # Add ".." entry unless we're at root
         if path and path != "/":
@@ -1036,13 +1061,7 @@ class FolderBrowserDialog(QDialog):
             self.list.addItem(item)
 
         count = len(folders)
-        suffix = f" folder{'s' if count != 1 else ''}"
-        existing = self.status_lbl.text()
-        if existing.startswith("[DEBUG]"):
-            # Append folder count to the debug line
-            self.status_lbl.setText(existing + f"  |  {count}{suffix}")
-        else:
-            self.status_lbl.setText(f"{count}{suffix}")
+        self.status_lbl.setText(f"{count} folder{'s' if count != 1 else ''}")
 
     def _on_double_click(self, item):
         kind, path = item.data(Qt.ItemDataRole.UserRole)
@@ -1108,8 +1127,10 @@ class FilesWorker(QThread):
 
     def _delete(self):
         file_name = self.kwargs["file_name"]   # full remote path / filename
+        # Strip leading slash — API path is /api/files/{fileName}
+        encoded = requests.utils.quote(file_name.lstrip("/"), safe="")
         resp = requests.delete(
-            f"{self.base_url}/api/files/{requests.utils.quote(file_name, safe='')}",
+            f"{self.base_url}/api/files/{encoded}",
             headers={"Authorization": f"Bearer {self.api_key}"},
             timeout=15,
         )
@@ -1197,13 +1218,15 @@ class FilesBrowserTab(QWidget):
       • Create / copy share link
     """
 
-    def __init__(self, get_api_key, parent=None):
+    def __init__(self, get_api_key, get_upload_path, set_upload_path, parent=None):
         super().__init__(parent)
-        self.get_api_key  = get_api_key   # callable → current API key string
-        self.base_url     = HARDCODED_BASE_URL
-        self.current_path = "/"
-        self._workers     = []            # keep refs alive
-        self._shares_map  = {}            # fileId → share token/url
+        self.get_api_key      = get_api_key
+        self.get_upload_path  = get_upload_path
+        self.set_upload_path  = set_upload_path
+        self.base_url         = HARDCODED_BASE_URL
+        self.current_path     = "/"
+        self._workers         = []
+        self._shares_map      = {}
 
         self._build_ui()
 
@@ -1284,6 +1307,25 @@ class FilesBrowserTab(QWidget):
 
         outer.addWidget(self.tree, 1)
 
+        # ── Upload destination bar ────────────────────────────────────────────
+        dest_row = QHBoxLayout()
+        dest_row.setSpacing(6)
+        dest_lbl = QLabel("Upload destination:")
+        dest_lbl.setObjectName("field_label")
+        dest_lbl.setStyleSheet("color:#9ca3af; font-size:11px; background:transparent; min-width:0;")
+        self.dest_display = QLabel("/")
+        self.dest_display.setStyleSheet(
+            "color:#c8975a; font-size:11px; font-weight:600; background:transparent;")
+        self.dest_display.setMinimumWidth(0)
+        set_dest_btn = QPushButton("Use current folder")
+        set_dest_btn.setObjectName("tb_btn")
+        set_dest_btn.setToolTip("Set the current browsed folder as the upload destination")
+        set_dest_btn.clicked.connect(self._set_as_upload_dest)
+        dest_row.addWidget(dest_lbl)
+        dest_row.addWidget(self.dest_display, 1)
+        dest_row.addWidget(set_dest_btn)
+        outer.addLayout(dest_row)
+
         # ── Share result bar ─────────────────────────────────────────────────
         self.share_bar = QLabel("")
         self.share_bar.setObjectName("log_console")
@@ -1316,7 +1358,7 @@ class FilesBrowserTab(QWidget):
     def _navigate(self, path):
         api_key = self.get_api_key()
         if not api_key:
-            self._status("⚠ Enter your API key in the Upload tab first.")
+            self._status("⚠ Enter your API key in the Settings tab first.")
             return
         self.current_path = path
         self.path_edit.setText(path)
@@ -1330,6 +1372,13 @@ class FilesBrowserTab(QWidget):
 
     def _refresh(self):
         self._navigate(self.current_path)
+        # Keep dest display in sync with the saved upload path
+        self.dest_display.setText(self.get_upload_path() or "/")
+
+    def _set_as_upload_dest(self):
+        self.set_upload_path(self.current_path)
+        self.dest_display.setText(self.current_path)
+        self._status(f"✓ Upload destination set to {self.current_path}")
 
     # ── Worker dispatch ───────────────────────────────────────────────────────
     def _run_worker(self, op, **kwargs):
@@ -1684,7 +1733,9 @@ class MochaUploader(QMainWindow):
 
         # ── Files tab ────────────────────────────────────────────────────────
         self.files_tab = FilesBrowserTab(
-            get_api_key=lambda: self.api_key_edit.text().strip()
+            get_api_key=lambda: self.api_key_edit.text().strip(),
+            get_upload_path=lambda: self.upload_path_edit.text().strip(),
+            set_upload_path=lambda p: self.upload_path_edit.setText(p),
         )
 
         # ── Settings tab ─────────────────────────────────────────────────────
@@ -1711,27 +1762,15 @@ class MochaUploader(QMainWindow):
         key_row.addWidget(self.show_key_cb)
         api_lay.addLayout(key_row)
 
-        path_row = QHBoxLayout()
-        path_lbl = QLabel("Upload path")
-        path_lbl.setObjectName("field_label")
+        # upload_path_edit is hidden — set via the Files tab "Use current folder" button
         self.upload_path_edit = QLineEdit()
-        self.upload_path_edit.setPlaceholderText("/folder/subfolder")
         self.upload_path_edit.setText("/")
-        self.browse_path_btn = QPushButton("Browse")
-        self.browse_path_btn.setObjectName("browse_btn")
-        self.browse_path_btn.setFixedWidth(68)
-        self.browse_path_btn.clicked.connect(self._browse_remote_path)
-        path_row.addWidget(path_lbl)
-        path_row.addWidget(self.upload_path_edit, 1)
-        path_row.addWidget(self.browse_path_btn)
-        api_lay.addLayout(path_row)
+        self.upload_path_edit.hide()
 
         self.remember_cb = QCheckBox("Remember settings across sessions")
         api_lay.addWidget(self.remember_cb)
 
         settings_lay.addWidget(api_card)
-
-        # ── Debug ─────────────────────────────────────────────────────────────
         settings_lay.addWidget(self._make_section_header("Logging"))
         debug_card = self._make_card()
         debug_lay  = QVBoxLayout(debug_card)
@@ -1804,7 +1843,7 @@ class MochaUploader(QMainWindow):
         status_lay.addLayout(prog_row)
 
         # Log console
-        self.log_label = QLabel("Ready — configure your API key and select a file.")
+        self.log_label = QLabel("Ready — select a file to upload. Set the destination folder in the Files tab.")
         self.log_label.setObjectName("log_console")
         self.log_label.setWordWrap(True)
         self.log_label.setMinimumHeight(46)
@@ -1896,16 +1935,6 @@ class MochaUploader(QMainWindow):
     def _toggle_key_visibility(self, checked):
         mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
         self.api_key_edit.setEchoMode(mode)
-
-    def _browse_remote_path(self):
-        api_key = self.api_key_edit.text().strip()
-        if not api_key:
-            self._log("⚠ Enter your API key first to browse remote folders.")
-            return
-        current = self.upload_path_edit.text().strip() or "/"
-        dlg = FolderBrowserDialog(api_key, HARDCODED_BASE_URL, current, parent=self)
-        if dlg.exec():
-            self.upload_path_edit.setText(dlg.selected)
 
     def _toggle_share_options(self, checked):
         self.share_opts_widget.setVisible(checked)
@@ -2059,8 +2088,10 @@ class MochaUploader(QMainWindow):
 
     def _on_tab_changed(self, index):
         # Auto-refresh the Files tab when switched to (if API key is present)
-        if index == 1 and self.api_key_edit.text().strip():
-            self.files_tab._refresh()
+        if index == 1:
+            self.files_tab.dest_display.setText(self.upload_path_edit.text().strip() or "/")
+            if self.api_key_edit.text().strip():
+                self.files_tab._refresh()
         # Auto-save settings when leaving Settings tab
         elif index != 2:
             self._save_settings()
