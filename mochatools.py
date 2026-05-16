@@ -406,13 +406,15 @@ class UploadWorker(QThread):
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def run(self):
-        total_files = len(self.file_pairs)
+        total_files  = len(self.file_pairs)
         last_file_id = None
         last_share_url = None
 
         # ── Pre-create every unique destination directory ──────────────────────
-        # The upload API ignores x-file-path and always lands files in root.
-        # We create the folders first, then move each file after upload.
+        # Folders must exist before uploading into them. We create the full tree
+        # first (sorted so parents are always created before children), then
+        # upload each file with x-file-path pointing at its destination folder.
+        # The API does honour x-file-path once the folder exists.
         dest_dirs = sorted({
             "/".join(dest.rstrip("/").split("/")[:-1]) or "/"
             for _, dest in self.file_pairs
@@ -427,16 +429,23 @@ class UploadWorker(QThread):
                 self.error.emit(f"Failed to create folder {d!r}: {e}")
                 return
 
+        # ── Upload each file directly into its destination folder ──────────────
         for idx, (local_path, dest_path) in enumerate(self.file_pairs, 1):
             if self._cancel:
                 return
 
             file_name = os.path.basename(local_path)
             prefix    = f"[{idx}/{total_files}] " if total_files > 1 else ""
-            dest_dir  = "/".join(dest_path.rstrip("/").split("/")[:-1]) or "/"
 
             try:
                 file_size = os.path.getsize(local_path)
+
+                # Skip empty files — API requires positive Content-Length
+                if file_size == 0:
+                    self.status.emit(f"{prefix}{file_name}  ⊘ Skipped (empty file)")
+                    self.status.emit(f"[DEBUG] Skipped empty file: {local_path}")
+                    continue
+
                 self.status.emit(f"{prefix}{file_name}  ({self._fmt_size(file_size)})")
                 self.status.emit(f"[DEBUG] Local path: {local_path}")
                 self.status.emit(f"[DEBUG] Remote dest: {dest_path}")
@@ -453,14 +462,6 @@ class UploadWorker(QThread):
                     return
 
                 self.status.emit(f"[DEBUG] File ID returned to run(): {file_id}")
-
-                # Move the file to its intended destination folder.
-                # The upload API ignores x-file-path so every file lands in root —
-                # an explicit move is always required.
-                if dest_dir != "/":
-                    self.status.emit(f"Moving to {dest_dir}/…")
-                    file_id = self._move_file(file_id, dest_dir)
-
                 last_file_id = file_id
 
                 if self.create_share and idx == total_files:
@@ -831,24 +832,26 @@ class UploadWorker(QThread):
 
     def _ensure_folder(self, path):
         """Create a folder and all missing parents via POST /api/files/folders.
+        The API takes {"path": <parent>, "name": <folder_name>}.
         409 Conflict (already exists) is silently ignored."""
         parts = path.strip("/").split("/")
         for depth in range(1, len(parts) + 1):
-            sub = "/" + "/".join(parts[:depth])
+            name   = parts[depth - 1]
+            parent = ("/" + "/".join(parts[:depth - 1])).rstrip("/") or "/"
             try:
                 resp = requests.post(
                     f"{self.base_url}/api/files/folders",
                     headers={**self._headers(), "Content-Type": "application/json"},
-                    json={"path": sub},
+                    json={"path": parent, "name": name},
                     timeout=15,
                 )
                 if resp.status_code == 409:
-                    self.status.emit(f"[DEBUG] Folder already exists: {sub}")
+                    self.status.emit(f"[DEBUG] Folder already exists: {parent}/{name}")
                 else:
                     resp.raise_for_status()
-                    self.status.emit(f"[DEBUG] Created folder: {sub}")
+                    self.status.emit(f"[DEBUG] Created folder: {parent}/{name}")
             except requests.HTTPError as e:
-                self.status.emit(f"[DEBUG] Folder create error {sub}: {e}")
+                self.status.emit(f"[DEBUG] Folder create error {parent}/{name}: {e}")
                 raise
 
     def _move_file(self, file_id, dest_path):
@@ -971,13 +974,13 @@ class DropZone(QFrame):
         if chosen == act_file:
             path, _ = QFileDialog.getOpenFileName(self, "Select file")
             if path:
-                self._set_paths([path], os.path.dirname(path))
+                self._set_paths([path], os.path.dirname(path), is_folder=False)
         elif chosen == act_folder:
             path = QFileDialog.getExistingDirectory(self, "Select folder")
             if path:
                 files = self._collect_folder(path)
                 if files:
-                    self._set_paths(files, path)
+                    self._set_paths(files, path, is_folder=True)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -1000,11 +1003,11 @@ class DropZone(QFrame):
             return
         path = urls[0].toLocalFile()
         if os.path.isfile(path):
-            self._set_paths([path], os.path.dirname(path))
+            self._set_paths([path], os.path.dirname(path), is_folder=False)
         elif os.path.isdir(path):
             files = self._collect_folder(path)
             if files:
-                self._set_paths(files, path)
+                self._set_paths(files, path, is_folder=True)
 
     @staticmethod
     def _collect_folder(folder_path):
@@ -1015,18 +1018,23 @@ class DropZone(QFrame):
                 result.append(os.path.join(dirpath, fname))
         return sorted(result)
 
-    def _set_paths(self, file_list, root):
+    def _set_paths(self, file_list, root, is_folder=False):
         if not file_list:
             return
         name = os.path.basename(root.rstrip("/\\"))
-        if len(file_list) == 1:
+        if len(file_list) == 1 and not is_folder:
+            # Single file was selected
             size  = os.path.getsize(file_list[0])
             label = f"{os.path.basename(file_list[0])}  ({UploadWorker._fmt_size(size)})"
+            selected_root = root
         else:
+            # Folder was selected (may contain 1 or more files)
             total = sum(os.path.getsize(p) for p in file_list)
             label = f"{name}/  —  {len(file_list)} files  ({UploadWorker._fmt_size(total)})"
+            # For a folder, set selected_root to the parent so the folder name is preserved
+            selected_root = os.path.dirname(root.rstrip("/\\"))
         self.file_label.setText(label)
-        self.selection_changed.emit(file_list, root)
+        self.selection_changed.emit(file_list, selected_root)
 
 
 
@@ -1233,15 +1241,57 @@ class FilesWorker(QThread):
         self.done.emit({"op": "delete", "file_name": file_name})
 
     def _delete_folder(self):
-        path = self.kwargs["path"]
-        resp = requests.delete(
-            f"{self.base_url}/api/files/folders",
-            headers=self._h(),
-            json={"path": path},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        self.done.emit({"op": "delete_folder", "path": path})
+        full_path = self.kwargs["path"].rstrip("/")
+        if not full_path or full_path == "/":
+            # Cannot delete root
+            raise ValueError("Cannot delete root folder")
+
+        # Split path into parent and folder name
+        # Example: /Functionality/New folder → parent=/Functionality, name=New folder
+        #          /music → parent=/, name=music
+        if "/" in full_path.lstrip("/"):
+            # Has a parent folder
+            parts  = full_path.rsplit("/", 1)
+            parent = parts[0] if parts[0] else "/"
+            name   = parts[1]
+        else:
+            # Root-level folder
+            parent = "/"
+            name   = full_path.lstrip("/")
+
+        url = f"{self.base_url}/api/files/folders"
+        payload = {"path": parent, "name": name}
+        headers = self._h()
+
+        # Debug logging
+        print(f"[DEBUG] Delete folder request:")
+        print(f"[DEBUG]   URL: {url}")
+        print(f"[DEBUG]   Full path: {full_path}")
+        print(f"[DEBUG]   Parent: {parent}")
+        print(f"[DEBUG]   Name: {name}")
+        print(f"[DEBUG]   Payload: {payload}")
+        print(f"[DEBUG]   Headers: {dict(headers)}")
+
+        try:
+            resp = requests.delete(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=15,
+            )
+            print(f"[DEBUG] Response status: {resp.status_code}")
+            print(f"[DEBUG] Response body: {resp.text}")
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            print(f"[DEBUG] HTTPError: {e}")
+            print(f"[DEBUG] Response status: {getattr(e.response, 'status_code', None)}")
+            print(f"[DEBUG] Response content: {getattr(e.response, 'text', None)}")
+            raise
+        except Exception as e:
+            print(f"[DEBUG] Exception: {e}")
+            raise
+
+        self.done.emit({"op": "delete_folder", "path": full_path})
 
     def _move(self):
         file_id  = self.kwargs.get("file_id")
@@ -1291,15 +1341,18 @@ class FilesWorker(QThread):
         self.done.emit({"op": "share", "url": url, "token": token})
 
     def _mkdir(self):
-        path = self.kwargs["path"]
+        full_path = self.kwargs["path"].rstrip("/")
+        parts     = full_path.rsplit("/", 1)
+        parent    = parts[0] or "/"
+        name      = parts[1] if len(parts) > 1 else full_path.lstrip("/")
         resp = requests.post(
             f"{self.base_url}/api/files/folders",
             headers=self._h(),
-            json={"path": path},
+            json={"path": parent, "name": name},
             timeout=15,
         )
         resp.raise_for_status()
-        self.done.emit({"op": "mkdir", "path": path})
+        self.done.emit({"op": "mkdir", "path": full_path})
 
     def _list_shares(self):
         resp = requests.get(
@@ -1511,6 +1564,8 @@ class FilesBrowserTab(QWidget):
         self.tree.clear()
         self.share_bar.hide()
 
+        print(f"[DEBUG] _navigate: navigating to path={path!r}")
+
         # Fetch file list and shares in parallel
         self._run_worker("list", path=path)
         self._run_worker("shares")
@@ -1567,17 +1622,29 @@ class FilesBrowserTab(QWidget):
         else:
             raw_files = raw_folders = []
 
+        print(f"[DEBUG] _populate: path={path!r}, raw_folders={raw_folders}")
+
         # ── Folders ──
         for entry in raw_folders:
             if isinstance(entry, str):
                 name     = entry.rstrip("/").split("/")[-1]
                 fullpath = entry
+                print(f"[DEBUG]   String folder entry: {entry!r} -> fullpath={fullpath!r}")
                 folders.append({"name": name, "path": fullpath})
             elif isinstance(entry, dict):
-                name = (entry.get("name") or entry.get("originalName")
-                        or entry.get("path", "").rstrip("/").split("/")[-1])
-                fullpath = entry.get("path") or f"{path.rstrip('/')}/{name}"
-                folders.append({"name": name, "path": fullpath, **entry})
+                entry_name = entry.get("name")
+                entry_path = entry.get("path")
+                name = (entry_name or entry.get("originalName")
+                        or entry_path.rstrip("/").split("/")[-1] if entry_path else "")
+                # ALWAYS compute fullpath based on current path if entry.path is not absolute
+                if entry_path and entry_path.startswith("/"):
+                    fullpath = entry_path
+                else:
+                    fullpath = f"{path.rstrip('/')}/{name}" if path != "/" else f"/{name}"
+                print(f"[DEBUG]   Dict folder: name={name!r}, entry.path={entry_path!r}, current_path={path!r}, computed fullpath={fullpath!r}")
+                # Important: put **entry first, then override with our computed path
+                folder_data = {**entry, "_type": "folder", "name": name, "path": fullpath}
+                folders.append(folder_data)
 
         # ── Files ──
         for entry in raw_files:
@@ -1586,8 +1653,14 @@ class FilesBrowserTab(QWidget):
                 if entry.get("type") == "folder" or entry.get("isFolder"):
                     name     = (entry.get("name") or
                                 entry.get("path", "").rstrip("/").split("/")[-1])
-                    fullpath = entry.get("path") or f"{path.rstrip('/')}/{name}"
-                    folders.append({"name": name, "path": fullpath, **entry})
+                    entry_path = entry.get("path")
+                    if entry_path and entry_path.startswith("/"):
+                        fullpath = entry_path
+                    else:
+                        fullpath = f"{path.rstrip('/')}/{name}" if path != "/" else f"/{name}"
+                    # Override with our computed path
+                    folder_data = {**entry, "name": name, "path": fullpath}
+                    folders.append(folder_data)
                 else:
                     files.append(entry)
 
