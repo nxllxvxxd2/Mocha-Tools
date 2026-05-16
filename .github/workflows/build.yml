@@ -3,6 +3,9 @@ name: Build Multi-Platform
 on:
   push:
     branches: [ "master" ]
+    paths:
+        - "mochatools.py"
+        - "requirements.txt"
 
 jobs:
   build:
