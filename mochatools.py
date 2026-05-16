@@ -410,12 +410,30 @@ class UploadWorker(QThread):
         last_file_id = None
         last_share_url = None
 
+        # ── Pre-create every unique destination directory ──────────────────────
+        # The upload API ignores x-file-path and always lands files in root.
+        # We create the folders first, then move each file after upload.
+        dest_dirs = sorted({
+            "/".join(dest.rstrip("/").split("/")[:-1]) or "/"
+            for _, dest in self.file_pairs
+        })
+        for d in dest_dirs:
+            if d == "/":
+                continue
+            self.status.emit(f"Creating folder: {d}")
+            try:
+                self._ensure_folder(d)
+            except Exception as e:
+                self.error.emit(f"Failed to create folder {d!r}: {e}")
+                return
+
         for idx, (local_path, dest_path) in enumerate(self.file_pairs, 1):
             if self._cancel:
                 return
 
             file_name = os.path.basename(local_path)
             prefix    = f"[{idx}/{total_files}] " if total_files > 1 else ""
+            dest_dir  = "/".join(dest_path.rstrip("/").split("/")[:-1]) or "/"
 
             try:
                 file_size = os.path.getsize(local_path)
@@ -435,10 +453,17 @@ class UploadWorker(QThread):
                     return
 
                 self.status.emit(f"[DEBUG] File ID returned to run(): {file_id}")
+
+                # Move the file to its intended destination folder.
+                # The upload API ignores x-file-path so every file lands in root —
+                # an explicit move is always required.
+                if dest_dir != "/":
+                    self.status.emit(f"Moving to {dest_dir}/…")
+                    file_id = self._move_file(file_id, dest_dir)
+
                 last_file_id = file_id
 
                 if self.create_share and idx == total_files:
-                    # Only create a share for the last file (or the only file)
                     self.status.emit("Creating share link…")
                     last_share_url = self._create_share(file_id)
                     self.status.emit(f"Share: {last_share_url}")
@@ -521,13 +546,6 @@ class UploadWorker(QThread):
         self.status.emit(f"[DEBUG] Parsed file ID: {file_id}  full JSON: {j}")
         self.status.emit(f"Upload complete. File ID: {file_id}")
         self.progress.emit(100)
-
-        # The API honours the `path` field in the multipart form body and places
-        # the file there directly — no post-upload move is needed.  Previously
-        # this code always tried to move the file, which produced a 400
-        # "Source and destination paths are the same" error when the API
-        # had already put the file at the correct path.
-
         return file_id
 
     # ── multipart upload (> 50 MB) ───────────────────────────────────────────
@@ -671,10 +689,6 @@ class UploadWorker(QThread):
         file_id = j.get("fileId") or j.get("id") or (j.get("file") or {}).get("id")
         self.status.emit(f"Multipart complete. File ID: {file_id}")
         self.progress.emit(100)
-
-        # The multipart init payload includes the destination folder, so the API
-        # places the file there directly — no post-upload move required.
-
         return file_id
 
     @staticmethod
@@ -815,6 +829,28 @@ class UploadWorker(QThread):
             pass
         self.status.emit("Upload aborted.")
 
+    def _ensure_folder(self, path):
+        """Create a folder and all missing parents via POST /api/files/folders.
+        409 Conflict (already exists) is silently ignored."""
+        parts = path.strip("/").split("/")
+        for depth in range(1, len(parts) + 1):
+            sub = "/" + "/".join(parts[:depth])
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/api/files/folders",
+                    headers={**self._headers(), "Content-Type": "application/json"},
+                    json={"path": sub},
+                    timeout=15,
+                )
+                if resp.status_code == 409:
+                    self.status.emit(f"[DEBUG] Folder already exists: {sub}")
+                else:
+                    resp.raise_for_status()
+                    self.status.emit(f"[DEBUG] Created folder: {sub}")
+            except requests.HTTPError as e:
+                self.status.emit(f"[DEBUG] Folder create error {sub}: {e}")
+                raise
+
     def _move_file(self, file_id, dest_path):
         """Move an uploaded file to dest_path via POST /api/files/move."""
         try:
@@ -881,8 +917,9 @@ class UploadWorker(QThread):
 
 # ── Drop Zone Widget ─────────────────────────────────────────────────────────
 class DropZone(QFrame):
-    # Emits a list of absolute local file paths (1 file, or many from a folder)
-    selection_changed = pyqtSignal(list)
+    # Emits (file_list, root) — root is the authoritative base for relpath so
+    # commonpath guessing is never needed (fixes folder-upload path stripping).
+    selection_changed = pyqtSignal(list, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -934,7 +971,7 @@ class DropZone(QFrame):
         if chosen == act_file:
             path, _ = QFileDialog.getOpenFileName(self, "Select file")
             if path:
-                self._set_paths([path], path)
+                self._set_paths([path], os.path.dirname(path))
         elif chosen == act_folder:
             path = QFileDialog.getExistingDirectory(self, "Select folder")
             if path:
@@ -963,7 +1000,7 @@ class DropZone(QFrame):
             return
         path = urls[0].toLocalFile()
         if os.path.isfile(path):
-            self._set_paths([path], path)
+            self._set_paths([path], os.path.dirname(path))
         elif os.path.isdir(path):
             files = self._collect_folder(path)
             if files:
@@ -978,10 +1015,10 @@ class DropZone(QFrame):
                 result.append(os.path.join(dirpath, fname))
         return sorted(result)
 
-    def _set_paths(self, file_list, display_root):
+    def _set_paths(self, file_list, root):
         if not file_list:
             return
-        name = os.path.basename(display_root.rstrip("/\\"))
+        name = os.path.basename(root.rstrip("/\\"))
         if len(file_list) == 1:
             size  = os.path.getsize(file_list[0])
             label = f"{os.path.basename(file_list[0])}  ({UploadWorker._fmt_size(size)})"
@@ -989,7 +1026,7 @@ class DropZone(QFrame):
             total = sum(os.path.getsize(p) for p in file_list)
             label = f"{name}/  —  {len(file_list)} files  ({UploadWorker._fmt_size(total)})"
         self.file_label.setText(label)
-        self.selection_changed.emit(file_list)
+        self.selection_changed.emit(file_list, root)
 
 
 
@@ -2086,16 +2123,12 @@ class MochaTools(QMainWindow):
     def _toggle_share_options(self, checked):
         self.share_opts_widget.setVisible(checked)
 
-    def _on_files_selected(self, file_list):
+    def _on_files_selected(self, file_list, root):
         self.selected_files = file_list
+        self.selected_root  = root
         if len(file_list) == 1:
-            self.selected_root = os.path.dirname(file_list[0])
             self._log(f"Selected: {os.path.basename(file_list[0])}")
         else:
-            # Common root = the dropped folder itself (parent of first file's dir)
-            self.selected_root = os.path.commonpath(file_list)
-            if os.path.isfile(self.selected_root):
-                self.selected_root = os.path.dirname(self.selected_root)
             self._log(f"Selected folder: {len(file_list)} files")
         self.share_result.hide()
 
