@@ -3,10 +3,7 @@ name: Build Multi-Platform
 on:
   push:
     branches: [ "master" ]
-
-defaults:
-  run:
-    shell: bash
+  pull_request:
 
 jobs:
   build:
@@ -29,6 +26,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Build executable
+        shell: bash
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             pyinstaller --onefile --noconsole --icon=icon.ico mochatools.py
