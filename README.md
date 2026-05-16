@@ -15,12 +15,6 @@
 ```
 *Cross platform uploader for Mocha written in Python and designed to be compiled with pyinstaller*
                         
-|**CURRENT ISSUES**|
-| :---- |
-|<ul><li>Unable to toggle share as active or inactive</li><li>~~Share link creation creates share but provides incorrect link~~</li><li>~~Folder upload just dumps all files in root without creating new folder~~</li><li>~~Original file names not being listed~~ Thank you [Bink-lab](https://github.com/Bink-lab)</li><li>~~Unable to move files~~</li><li>~~Unable to ~~create~~ or view shares~~</li><li>~~Large file upload is not working correctly~~ Thank you [Bink-lab](https://github.com/Bink-lab)</li><li>~~Uploading to specific existing folders is not functioning~~</li><li>~~Moving files or folders deeper than one folder does not function~~</li><li>~~Uploading deeper than one folder is not working~~</li></ul>|
-
-
-
 ## Source Requirements
 - Python 3.10 or higher (can be downloader [here](https://www.python.org/downloads/)
 - PyQt6
@@ -50,3 +44,6 @@
 | Complete control over files, deletion, moving, sharing, etc. | ❌ |
 | Debug and token management in its own tab | ✅ |
 
+|**CURRENT ISSUES**|
+| :---- |
+|<ul><li>Unable to toggle share as active or inactive</li><li>~~Share link creation creates share but provides incorrect link~~</li><li>~~Folder upload just dumps all files in root without creating new folder~~</li><li>~~Original file names not being listed~~ Thank you [Bink-lab](https://github.com/Bink-lab)</li><li>~~Unable to move files~~</li><li>~~Unable to ~~create~~ or view shares~~</li><li>~~Large file upload is not working correctly~~ Thank you [Bink-lab](https://github.com/Bink-lab)</li><li>~~Uploading to specific existing folders is not functioning~~</li><li>~~Moving files or folders deeper than one folder does not function~~</li><li>~~Uploading deeper than one folder is not working~~</li></ul>|
