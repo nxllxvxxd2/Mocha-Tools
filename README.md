@@ -5,12 +5,16 @@
   <img src=".github/resources/screenshot.png" alt="Mocha Tools main window" width="720">
 </p>
 
+![Divider](https://capsule-render.vercel.app/api?type=rect&color=ff0000&height=3)
 
-![Activity](https://github-readme-activity-graph.vercel.app/graph?username=nxllxvxxd2&repo=Mocha-Tools&bg_color=000000&color=ff0000&line=ff0000&point=ffffff&area=true&hide_border=true)![Status](https://img.shields.io/badge/STATUS-ACTIVE-red?style=for-the-badge&labelColor=000000&logo=github&logoColor=red)
+![Status](https://img.shields.io/badge/STATUS-ACTIVE-red?style=for-the-badge&labelColor=000000&logo=github&logoColor=red)
+![Commits](https://img.shields.io/github/commit-activity/m/nxllxvxxd2/Mocha-Tools?style=for-the-badge&color=red&labelColor=000000&label=Commits+This+Month)
 ![Last Commit](https://img.shields.io/github/last-commit/nxllxvxxd2/Mocha-Tools?style=for-the-badge&color=red&labelColor=000000&logo=github)
 ![Repo Size](https://img.shields.io/github/repo-size/nxllxvxxd2/Mocha-Tools?style=for-the-badge&color=red&labelColor=000000)
 ![License](https://img.shields.io/github/license/nxllxvxxd2/Mocha-Tools?style=for-the-badge&color=red&labelColor=000000)
 ![Python](https://img.shields.io/badge/Python-3.10+-red?style=for-the-badge&labelColor=000000&logo=python&logoColor=ff0000)
+![Contributors](https://contrib.rocks/image?repo=nxllxvxxd2/Mocha-Tools)
+
 ![Divider](https://capsule-render.vercel.app/api?type=rect&color=ff0000&height=3)
 
 ## HUGE THANKS TO [BINK-LAB](https://github.com/Bink-lab) FOR MOCHA, ACCESS TO IT AND THE API, AS WELL AS CONTRIBUTIONS
