@@ -4,9 +4,7 @@
 </p>
 
 ## HUGE THANKS TO [BINK-LAB](https://github.com/Bink-lab) FOR MOCHA, ACCESS TO IT AND THE API, AS WELL AS CONTRIBUTIONS
-
-*Cross platform uploader for Mocha written in Python and designed to be compiled with pyinstaller*
-                        
+[![Typing SVG](https://readme-typing-svg.demolab.com?font=Fira+Code&pause=1000&color=FF0000&background=000000&width=600&lines=Cross+platform+uploader+for+Mocha;Written+in+Python;Designed+to+be+compiled+with+PyInstaller)](https://git.io/typing-svg)                        
 ## Source Requirements
 - Python 3.10 or higher (can be downloader [here](https://www.python.org/downloads/)
 - PyQt6
