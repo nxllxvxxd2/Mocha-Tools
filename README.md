@@ -28,13 +28,18 @@
 - Togglable debug mode for easier troubleshooting
 
 ## Preview
-| Drag and drop uploads | Remote ingest |
-| :----: | :----: |
-| <img src=".github/resources/dragdrop.gif" alt="Uploading files with drag and drop" width="420"> | <img src=".github/resources/remoteingest.gif" alt="Starting a remote ingest job" width="420"> |
+<p align="center">
+  <img src=".github/resources/sharetab.gif" alt="Managing shares in Mocha Tools" width="420">
+</p>
 
-| Share creation | Share management |
-| :----: | :----: |
-| <img src=".github/resources/sharecreation.gif" alt="Creating a Mocha share link" width="420"> | <img src=".github/resources/sharetab.gif" alt="Managing shares in Mocha Tools" width="420"> |
+<p align="center">
+  <img src=".github/resources/dragdrop.gif" alt="Uploading files with drag and drop" width="420">
+  <img src=".github/resources/remoteingest.gif" alt="Starting a remote ingest job" width="420">
+</p>
+
+<p align="center">
+  <img src=".github/resources/sharecreation.gif" alt="Creating a Mocha share link" width="848">
+</p>
 
 ## Potential? Ideas
 | Idea | Complete? |
