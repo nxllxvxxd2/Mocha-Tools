@@ -55,12 +55,14 @@ jobs:
             pyinstaller --onefile --noconsole \
               --version-file ./builditems/windows/version.txt \
               --icon=./builditems/windows/icon.ico \
+              --name "Mocha Tools" \
               mochatools.py
 
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             pyinstaller --noconsole --windowed \
               --name "Mocha Tools" \
               --osx-bundle-identifier com.nxllxvxxd2.mochatools \
+              --name "Mocha Tools" \
               mochatools.py
 
             # Copy Info.plist manually after build
@@ -69,6 +71,7 @@ jobs:
           else
             pyinstaller --onefile --noconsole \
               --icon=./builditems/debian_ubuntu/icon.png \
+              --name "Mocha Tools" \
               mochatools.py
           fi
 
@@ -87,7 +90,7 @@ jobs:
           fpm -s dir -t deb \
             -n mocha-tools \
             -v $VERSION \
-            --description "Mocha Tools Utility" \
+            --description "Mocha Tools" \
             deb_build/=/
 
       - name: Upload artifact

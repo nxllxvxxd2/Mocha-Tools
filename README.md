@@ -13,6 +13,9 @@
                     ░                                                                         
                                                                                                 
 ```
+
+## HUGE THANKS TO [BINK-LAB](https://github.com/Bink-lab) FOR MOCHA, ACCESS TO IT AND THE API, AS WELL AS CONTRIBUTIONS
+
 *Cross platform uploader for Mocha written in Python and designed to be compiled with pyinstaller*
                         
 ## Source Requirements
@@ -38,7 +41,7 @@
 ## Potential? Ideas
 | Idea | Complete? |
 | :---- | :----: |
-| Add download support for your own files | ❌ |
+| Add download support for your own files | ✅ |
 | Create android version | ❌ |
 | Add to context menu (traditiional and Windows 11 (maybe idk how that works yet) for easy uploading | ❌ |
 | Complete control over files, deletion, moving, sharing, etc. | ✅ |
