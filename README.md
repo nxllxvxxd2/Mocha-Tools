@@ -34,6 +34,9 @@
 2. `cd Mocha-Tools`
 3. `pip install -r requirements.txt`
 4. `python mochatools.py`
+
+![Divider](https://capsule-render.vercel.app/api?type=rect&color=ff0000&height=3)
+
 ## Features
 - Uploads files to Mocha with a simple drag and drop interface, or selection through file manager.
 - Folder upload support (note issues listed above)
