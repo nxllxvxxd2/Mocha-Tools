@@ -26,7 +26,7 @@
 - requests
 - pyinstaller
 - A Mocha account and an API key
-- 
+
 ![Divider](https://capsule-render.vercel.app/api?type=rect&color=ff0000&height=3)
 
 ### Running From Source
