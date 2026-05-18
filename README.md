@@ -1,4 +1,4 @@
-<img src=".github/resources/bannertest.png" alt="Mocha Tools banner" width="720">
+<img src=".github/resources/banner.png" alt="Mocha Tools banner" width="800">
 <p align="center">
   <img src=".github/resources/screenshot.png" alt="Mocha Tools main window" width="720">
 </p>
