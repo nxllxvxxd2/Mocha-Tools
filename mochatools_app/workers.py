@@ -10,6 +10,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from .constants import (
     CHUNK_SIZE,
     CHUNK_THRESHOLD,
+    DEFAULT_CHUNK_SIZE_MB,
+    DEFAULT_MAX_CHUNKS,
     PART_UPLOAD_RETRIES,
     PART_UPLOAD_TIMEOUT,
     RELAY_DEFAULT_CONCURRENCY,
@@ -81,11 +83,14 @@ class UploadWorker(QThread):
     error       = pyqtSignal(str)
 
     def __init__(self, api_key, base_url, file_pairs,
-                 create_share, share_expiry, share_max_downloads):
+                 create_share, share_expiry, share_max_downloads,
+                 chunk_size_mb=None, max_chunks=None):
         """
         file_pairs: list of (local_abs_path, remote_dest_path) tuples.
         remote_dest_path is already the full absolute path on Mocha,
         e.g. '/Music/Album/CD1/track.flac'.
+        chunk_size_mb: size of each multipart chunk in MB (1–100).
+        max_chunks: maximum number of in-flight parallel chunks (1–20).
         """
         super().__init__()
         self.api_key             = api_key
@@ -94,6 +99,13 @@ class UploadWorker(QThread):
         self.create_share        = create_share
         self.share_expiry_hours  = share_expiry  # int hours or None
         self.share_max_downloads = share_max_downloads
+        # Chunk config — clamp to valid ranges
+        mb = int(chunk_size_mb) if chunk_size_mb is not None else DEFAULT_CHUNK_SIZE_MB
+        self._chunk_size  = max(1, min(mb, 100)) * 1024 * 1024  # bytes
+        mc = int(max_chunks) if max_chunks is not None else DEFAULT_MAX_CHUNKS
+        self._max_chunks  = max(1, min(mc, 20))
+        # Threshold: use multipart only when the file is larger than one chunk
+        self._chunk_threshold = self._chunk_size
         self._cancel             = False
 
     def cancel(self):
@@ -151,10 +163,10 @@ class UploadWorker(QThread):
                 self.status.emit(f"{prefix}{file_name}  ({self._fmt_size(file_size)})")
                 self.status.emit(f"[DEBUG] Local path: {local_path}")
                 self.status.emit(f"[DEBUG] Remote dest: {dest_path}")
-                self.status.emit(f"[DEBUG] File size (bytes): {file_size}  threshold: {CHUNK_THRESHOLD}")
+                self.status.emit(f"[DEBUG] File size (bytes): {file_size}  threshold: {self._chunk_threshold}")
 
-                if file_size <= CHUNK_THRESHOLD:
-                    self.status.emit(f"[DEBUG] Strategy: simple upload (≤ {self._fmt_size(CHUNK_THRESHOLD)})")
+                if file_size <= self._chunk_threshold:
+                    self.status.emit(f"[DEBUG] Strategy: simple upload (≤ {self._fmt_size(self._chunk_threshold)})")
                     file_id = self._simple_upload(file_size, local_path, dest_path)
                 else:
                     self.status.emit(f"[DEBUG] Strategy: multipart upload (> {self._fmt_size(CHUNK_THRESHOLD)})")
@@ -328,17 +340,12 @@ class UploadWorker(QThread):
             "mimeType": mime_type,
         }
 
-        # Use CHUNK_SIZE (10 MB) with 5 parallel workers so 50 MB is in flight
-        # at once — same throughput as a single 50 MB chunk but with smaller
-        # per-part SSL connections that the storage node handles reliably.
+        # Use configured chunk size; max concurrent parts is capped by _max_chunks.
         # partSizeBytes from the server is the *maximum* allowed, not a requirement.
-        # (which can be up to 200 MB).  Smaller chunks are more reliable and
-        # keep presigned URLs fresh within their 1-hour TTL.
-        # partSizeBytes is the *maximum* allowed, not a requirement.
-        chunk_size  = CHUNK_SIZE
+        chunk_size  = self._chunk_size
         total_parts = math.ceil(file_size / chunk_size)
         mode = "direct S3" if strategy == "s3" and direct else "server relay"
-        concurrency = self._multipart_concurrency(init_data, total_parts, mode)
+        concurrency = self._multipart_concurrency(init_data, total_parts, mode, self._max_chunks)
         self.status.emit(f"[DEBUG] Multipart upload: {total_parts} parts… (strategy={strategy}, mode={mode}, partSize={self._fmt_size(chunk_size)}, concurrency={concurrency})")
         self.status.emit(f"[DEBUG] Session: {upload_id}")
 
@@ -427,9 +434,11 @@ class UploadWorker(QThread):
         return file_id
 
     @staticmethod
-    def _multipart_concurrency(init_data, total_parts, mode):
+    def _multipart_concurrency(init_data, total_parts, mode, user_max_chunks=None):
         default = S3_DEFAULT_CONCURRENCY if mode == "direct S3" else RELAY_DEFAULT_CONCURRENCY
         maximum = S3_MAX_CONCURRENCY if mode == "direct S3" else RELAY_MAX_CONCURRENCY
+        if user_max_chunks is not None:
+            maximum = user_max_chunks
         value = init_data.get("partUploadConcurrency", default)
         try:
             parsed = int(value)
